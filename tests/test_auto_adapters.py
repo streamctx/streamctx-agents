@@ -258,12 +258,8 @@ def test_reddit_publish_respects_approval_karma_and_interval(store, story):
     assert published.status == STATUS_PUBLISHED
     assert REDDIT_SUBMIT_URL in http.posted_urls()
 
-    second = adapter.queue(story, target="python")
-    store.approve(second)
     with pytest.raises(RedditRateLimitError):
-        adapter.publish(second)
-    assert store.get_entry(second).status == STATUS_APPROVED
-    assert http.posted_urls().count(REDDIT_SUBMIT_URL) == 1
+        adapter.queue(story, target="python")
 
     other = adapter.queue(story, target="r/MachineLearning")
     store.approve(other)

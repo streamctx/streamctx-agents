@@ -76,6 +76,10 @@ class RedditRateLimiter:
             self._conn.commit()
 
     def assert_can_post(self, subreddit: str, karma: RedditKarma) -> None:
+        self.assert_karma(karma)
+        self.assert_interval(subreddit)
+
+    def assert_karma(self, karma: RedditKarma) -> None:
         if karma.link_karma < self.min_link_karma:
             raise RedditKarmaGateError(
                 f"link_karma {karma.link_karma} < minimum {self.min_link_karma}; "
@@ -86,6 +90,8 @@ class RedditRateLimiter:
                 f"comment_karma {karma.comment_karma} < minimum {self.min_comment_karma}; "
                 "refusing Reddit auto-post."
             )
+
+    def assert_interval(self, subreddit: str) -> None:
         name = normalize_subreddit(subreddit)
         last = self.last_posted_at(name)
         if last is None:

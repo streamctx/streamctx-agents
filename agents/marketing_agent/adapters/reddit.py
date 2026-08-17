@@ -23,6 +23,7 @@ from agents.marketing_agent.adapters.rate_limit import (
 from agents.marketing_agent.http import JsonHttpClient, JsonHttpError
 from agents.marketing_agent.models import PendingApprovalEntry, Story
 from agents.marketing_agent.pending_approval import CONTENT_COMMENT, CONTENT_POST, PLATFORM_REDDIT
+from agents.marketing_agent.safety import SafetyRules
 from agents.marketing_agent.settings import (
     REDDIT_CLIENT_ID,
     REDDIT_CLIENT_SECRET,
@@ -87,8 +88,23 @@ class RedditAdapter(AutoAdapter):
             user_agent=(credentials.user_agent if credentials else REDDIT_USER_AGENT)
         )
         self.credentials = credentials if credentials is not None else RedditCredentials.from_env()
-        self.limiter = limiter or RedditRateLimiter(store.db_path)
+        if limiter is not None:
+            self.limiter = limiter
+        else:
+            rl = (safety.rules if safety is not None else SafetyRules.load()).rate_limit
+            self.limiter = RedditRateLimiter(
+                store.db_path,
+                interval_seconds=rl.interval_seconds,
+                min_link_karma=rl.min_link_karma,
+                min_comment_karma=rl.min_comment_karma,
+            )
         self._access_token = access_token
+
+    def _safety(self):
+        gate = super()._safety()
+        if gate.rate_limiter is None:
+            gate.rate_limiter = self.limiter
+        return gate
 
     def format(self, story: Story, target: Optional[str] = None) -> str:
         if self.content_type == CONTENT_COMMENT:

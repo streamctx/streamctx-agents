@@ -39,5 +39,22 @@
     "min_normalized_chars": 40,
     "block_same_platform": false,
     "compare_statuses": ["pending", "approved", "published"]
+  },
+  "thread_age": {
+    "enabled": true,
+    "platforms": ["hn"],
+    "content_types": ["comment"],
+    "require_reply_link": true,
+    "reject_algolia": true,
+    "item_hosts": ["news.ycombinator.com"]
+  },
+  "rate_limit": {
+    "enabled": true,
+    "platforms": ["reddit"],
+    "interval_seconds": 172800,
+    "min_link_karma": 50,
+    "min_comment_karma": 50,
+    "check_on_queue": true,
+    "block_if_queued": true
   }
 }

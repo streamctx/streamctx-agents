@@ -1,4 +1,8 @@
-"""Unit tests for Stage 4 safety rules (self-promo + duplicate stagger)."""
+"""Unit tests for the marketing safety rules layer.
+
+Stage 4: self-promo + duplicate stagger.
+Stage 6: those plus config-driven HN thread-age and Reddit rate limiting at queue time.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from agents.marketing_agent.adapters.hn import HackerNewsAdapter
+from agents.marketing_agent.adapters.hn import HackerNewsAdapter, HNThreadLockedError
 from agents.marketing_agent.adapters.linkedin import LinkedInAdapter
+from agents.marketing_agent.adapters.rate_limit import RedditRateLimitError, RedditRateLimiter
+from agents.marketing_agent.adapters.reddit import RedditAdapter, RedditCredentials
 from agents.marketing_agent.adapters.twitter import TwitterAdapter, TwitterCredentials
 from agents.marketing_agent.models import Story
-from agents.marketing_agent.pending_approval import PendingApprovalStore
+from agents.marketing_agent.pending_approval import CONTENT_COMMENT, CONTENT_DM, PendingApprovalStore
 from agents.marketing_agent.safety import (
     DuplicateContentError,
     SafetyGate,
@@ -47,6 +53,14 @@ def test_shipped_rules_file_is_json():
     assert "reddit" in rules.self_promo.platforms
     assert rules.self_promo.phrases
     assert rules.duplicate.similarity_threshold > 0
+    assert rules.thread_age.enabled
+    assert "hn" in rules.thread_age.platforms
+    assert "comment" in rules.thread_age.content_types
+    assert rules.rate_limit.enabled
+    assert "reddit" in rules.rate_limit.platforms
+    assert rules.rate_limit.interval_seconds >= 86400
+    assert rules.rate_limit.check_on_queue
+    assert rules.rate_limit.block_if_queued
 
 
 def test_self_promo_rewrites_then_blocks_hn(store):
@@ -174,3 +188,159 @@ def test_rewrite_uses_config_replacements_not_python_literals():
     assert "shameless plug" not in cleaned.lower()
     assert "try our" not in cleaned.lower()
     assert "wrap() fix" in cleaned
+
+
+HN_ITEM = "https://news.ycombinator.com/item?id=44400001"
+LOCKED_HTML = """
+<html><body>
+<a href="item?id=44400001">parent</a>
+<p>This post is too old to comment on.</p>
+</body></html>
+"""
+OPEN_HTML = """
+<html><body>
+<a href="reply?id=44400001">reply</a>
+</body></html>
+"""
+
+
+def _locked_fetch(_url: str) -> str:
+    return LOCKED_HTML
+
+
+def _open_fetch(_url: str) -> str:
+    return OPEN_HTML
+
+
+def _reddit_adapter(store, limiter=None, safety=None) -> RedditAdapter:
+    return RedditAdapter(
+        store,
+        limiter=limiter,
+        safety=safety,
+        http=object(),
+        access_token="test-token",
+        credentials=RedditCredentials(
+            client_id="id", client_secret="s", username="u", password="p"
+        ),
+    )
+
+
+def test_hn_comment_thread_age_blocks_locked_thread_at_gate(store):
+    gate = SafetyGate(rules=SafetyRules.load(SHIPPED_RULES), fetch_page=_locked_fetch)
+    with pytest.raises(HNThreadLockedError, match="reply link"):
+        gate.prepare(
+            "wrap() is now per-client instead of a process-global tracker.",
+            platform="hn",
+            store=store,
+            content_type=CONTENT_COMMENT,
+            target=HN_ITEM,
+        )
+    assert store.list_by_status("pending") == []
+
+
+def test_thread_age_can_be_disabled_in_config(store, changelog_story, tmp_path):
+    data = json.loads(SHIPPED_RULES.read_text(encoding="utf-8"))
+    data["thread_age"]["enabled"] = False
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    fetches: list[str] = []
+
+    def fetch(url: str) -> str:
+        fetches.append(url)
+        raise AssertionError("disabled thread-age must not fetch")
+
+    gate = SafetyGate(rules=SafetyRules.load(path), fetch_page=fetch)
+    adapter = HackerNewsAdapter(
+        store,
+        content_type=CONTENT_COMMENT,
+        fetch_page=fetch,
+        safety=gate,
+    )
+    entry_id = adapter.queue(changelog_story, target=HN_ITEM)
+    assert store.get_entry(entry_id) is not None
+    assert fetches == []
+
+
+def test_reddit_interval_blocks_queue_after_recent_post(store, changelog_story):
+    limiter = RedditRateLimiter(
+        store.db_path, interval_seconds=3600, min_link_karma=50, min_comment_karma=50
+    )
+    limiter.record_post("python")
+    adapter = _reddit_adapter(store, limiter=limiter)
+    with pytest.raises(RedditRateLimitError, match="r/python"):
+        adapter.queue(changelog_story, target="r/python")
+    assert store.list_by_status("pending") == []
+    limiter.close()
+
+
+def test_reddit_block_if_queued_same_subreddit(store, changelog_story):
+    limiter = RedditRateLimiter(store.db_path, interval_seconds=3600)
+    adapter = _reddit_adapter(store, limiter=limiter)
+    first = adapter.queue(changelog_story, target="r/python")
+    other = Story(
+        headline="AttributionEngine scores DRIFT vs COMPRESSION",
+        key_facts=["Weighted heuristic verified at 0.82 confidence on a real failure."],
+        proof_point="0.82 confidence on a real failure",
+        tone_tags=["observability", "technical"],
+    )
+    with pytest.raises(RedditRateLimitError, match="pending"):
+        adapter.queue(other, target="python")
+    pending = store.list_by_status("pending")
+    assert len(pending) == 1
+    assert pending[0].entry_id == first
+    limiter.close()
+
+
+def test_rate_limit_thresholds_come_from_rules_file(store, changelog_story, tmp_path):
+    data = json.loads(SHIPPED_RULES.read_text(encoding="utf-8"))
+    data["rate_limit"]["interval_seconds"] = 3600
+    data["rate_limit"]["block_if_queued"] = False
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    gate = SafetyGate(rules=SafetyRules.load(path))
+    adapter = _reddit_adapter(store, safety=gate)
+    assert adapter.limiter.interval.total_seconds() == 3600
+    first = adapter.queue(changelog_story, target="r/python")
+    other = Story(
+        headline="Session resume from checkpoint N instead of replay",
+        key_facts=["resume(session_id) restores the message list."],
+        proof_point="resume(session_id) restores the message list",
+        tone_tags=["reliability"],
+    )
+    second = adapter.queue(other, target="python")
+    assert first != second
+    assert len(store.list_by_status("pending")) == 2
+
+
+def test_dm_skips_thread_age_and_rate_limit(store):
+    fetches: list[str] = []
+
+    def fetch(url: str) -> str:
+        fetches.append(url)
+        raise AssertionError("DMs must not fetch HN item pages")
+
+    limiter = RedditRateLimiter(store.db_path, interval_seconds=3600)
+    limiter.record_post("python")
+    gate = SafetyGate(
+        rules=SafetyRules.load(SHIPPED_RULES),
+        fetch_page=fetch,
+        rate_limiter=limiter,
+    )
+    text = gate.prepare(
+        "On your post about lost context — StreamCtx compression keeps earlier turns.",
+        platform="hn",
+        store=store,
+        content_type=CONTENT_DM,
+        target=HN_ITEM,
+    )
+    assert "StreamCtx" in text
+    assert fetches == []
+    reddit_dm = gate.prepare(
+        "Same idea for the reddit thread.",
+        platform="reddit",
+        store=store,
+        content_type=CONTENT_DM,
+        target="https://www.reddit.com/r/python/comments/abc/lost_context/",
+    )
+    assert reddit_dm
+    limiter.close()

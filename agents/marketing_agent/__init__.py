@@ -10,6 +10,7 @@ from agents.marketing_agent.pending_approval import PendingApprovalStore
 from agents.marketing_agent.safety import (
     DuplicateContentError,
     SafetyGate,
+    SafetyRules,
     SelfPromoError,
 )
 from agents.marketing_agent.sources import collect_sources, parse_changelog, load_significant_commits
@@ -37,6 +38,7 @@ __all__ = [
     "PublicPost",
     "RedditAdapter",
     "SafetyGate",
+    "SafetyRules",
     "ScoredLead",
     "SelfPromoError",
     "DuplicateContentError",

@@ -1,7 +1,11 @@
 """Config-driven safety checks that run before pending_approval inserts.
 
-Self-promo filter: HN/Reddit only (rewrite, then block if still hot).
-Duplicate guard: stagger near-identical stories across platforms on the same UTC day.
+Four gates, all tuned from ``safety_rules.json``:
+
+- Self-promo filter (HN/Reddit): rewrite, then block if still hot.
+- Thread-age check (HN comments): real ``item?id=`` page must still have a reply link.
+- Rate limiter (Reddit): per-subreddit interval, including pending occupancy.
+- Duplicate guard: stagger near-identical stories across platforms on the same UTC day.
 """
 
 from __future__ import annotations
@@ -15,8 +19,14 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from agents.marketing_agent.models import PendingApprovalEntry, Story
+from agents.marketing_agent.models import Story
 from agents.marketing_agent.pending_approval import PendingApprovalStore
+from agents.marketing_agent.thread_age import (
+    FetchPage,
+    ThreadAgeRules,
+    fetch_hn_item_page,
+    verify_hn_thread,
+)
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parent / "safety_rules.json"
 NowFn = Callable[[], datetime]
@@ -69,9 +79,29 @@ class DuplicateRules:
 
 
 @dataclass(frozen=True)
+class RateLimitRules:
+    enabled: bool
+    platforms: tuple[str, ...]
+    interval_seconds: int
+    min_link_karma: int
+    min_comment_karma: int
+    check_on_queue: bool
+    block_if_queued: bool
+
+    def applies(self, platform: str, content_type: Optional[str]) -> bool:
+        if not self.enabled or not self.check_on_queue:
+            return False
+        if platform not in self.platforms:
+            return False
+        return content_type != "dm"
+
+
+@dataclass(frozen=True)
 class SafetyRules:
     self_promo: SelfPromoRules
     duplicate: DuplicateRules
+    thread_age: ThreadAgeRules
+    rate_limit: RateLimitRules
 
     @classmethod
     def load(cls, path: Optional[Path | str] = None) -> SafetyRules:
@@ -83,6 +113,8 @@ class SafetyRules:
     def from_mapping(cls, data: Mapping[str, Any]) -> SafetyRules:
         promo = data.get("self_promo") or {}
         dup = data.get("duplicate") or {}
+        thread = data.get("thread_age") or {}
+        rate = data.get("rate_limit") or {}
         phrases = tuple(
             PromoPhrase(pattern=str(item["pattern"]), weight=float(item.get("weight", 1.0)))
             for item in promo.get("phrases") or []
@@ -116,6 +148,27 @@ class SafetyRules:
                     or ("pending", "approved", "published")
                 ),
             ),
+            thread_age=ThreadAgeRules(
+                enabled=bool(thread.get("enabled", True)),
+                platforms=tuple(str(p) for p in thread.get("platforms") or ("hn",)),
+                content_types=tuple(
+                    str(c) for c in thread.get("content_types") or ("comment",)
+                ),
+                require_reply_link=bool(thread.get("require_reply_link", True)),
+                reject_algolia=bool(thread.get("reject_algolia", True)),
+                item_hosts=tuple(
+                    str(h) for h in thread.get("item_hosts") or ("news.ycombinator.com",)
+                ),
+            ),
+            rate_limit=RateLimitRules(
+                enabled=bool(rate.get("enabled", True)),
+                platforms=tuple(str(p) for p in rate.get("platforms") or ("reddit",)),
+                interval_seconds=int(rate.get("interval_seconds", 172800)),
+                min_link_karma=int(rate.get("min_link_karma", 50)),
+                min_comment_karma=int(rate.get("min_comment_karma", 50)),
+                check_on_queue=bool(rate.get("check_on_queue", True)),
+                block_if_queued=bool(rate.get("block_if_queued", True)),
+            ),
         )
 
 
@@ -128,10 +181,12 @@ def default_rules_path() -> Path:
 
 @dataclass
 class SafetyGate:
-    """Run self-promo + duplicate checks; never writes the queue itself."""
+    """Run all four pre-queue checks; never writes the queue itself."""
 
     rules: SafetyRules
     now_fn: NowFn = field(default=lambda: datetime.now(timezone.utc))
+    fetch_page: Optional[FetchPage] = None
+    rate_limiter: Any = None
 
     @classmethod
     def default(cls) -> SafetyGate:
@@ -150,10 +205,11 @@ class SafetyGate:
         text = content
         promo = self.rules.self_promo
         # Personalized DMs are always human-reviewed; do not run the public-post
-        # self-promo filter or the cross-platform story stagger on them.
+        # self-promo filter, thread-age, rate limit, or story stagger on them.
         if content_type == "dm":
             _assert_dm_target_free(store, target)
             return text
+        self._assert_thread_age(platform, content_type, target)
         if platform in promo.platforms:
             text, score, reasons = review_self_promo(text, promo)
             if score >= promo.threshold:
@@ -169,7 +225,72 @@ class SafetyGate:
             fingerprint=fingerprint,
             today=self.now_fn().date().isoformat(),
         )
+        self._assert_rate_limit(platform, content_type, target, store)
         return text
+
+    def _assert_thread_age(
+        self,
+        platform: str,
+        content_type: Optional[str],
+        target: Optional[str],
+    ) -> None:
+        rules = self.rules.thread_age
+        if not rules.applies(platform, content_type):
+            return
+        verify_hn_thread(
+            target,
+            fetch_page=self.fetch_page or fetch_hn_item_page,
+            rules=rules,
+        )
+
+    def _assert_rate_limit(
+        self,
+        platform: str,
+        content_type: Optional[str],
+        target: Optional[str],
+        store: PendingApprovalStore,
+    ) -> None:
+        rules = self.rules.rate_limit
+        if not rules.applies(platform, content_type):
+            return
+        from agents.marketing_agent.adapters.rate_limit import (
+            RedditRateLimitError,
+            RedditRateLimiter,
+            normalize_subreddit,
+        )
+        from agents.marketing_agent.adapters.reddit import parse_reddit_target
+
+        try:
+            subreddit, _thing = parse_reddit_target(target, content_type or "post")
+        except Exception:
+            return
+        name = normalize_subreddit(subreddit)
+        limiter = self.rate_limiter
+        if limiter is None:
+            limiter = RedditRateLimiter(
+                store.db_path,
+                interval_seconds=rules.interval_seconds,
+                min_link_karma=rules.min_link_karma,
+                min_comment_karma=rules.min_comment_karma,
+                now_fn=self.now_fn,
+            )
+            self.rate_limiter = limiter
+        limiter.assert_interval(name)
+        if not rules.block_if_queued:
+            return
+        for status in ("pending", "approved"):
+            for entry in store.list_by_status(status):
+                if entry.platform != platform or entry.content_type == "dm":
+                    continue
+                try:
+                    other, _ = parse_reddit_target(entry.target, entry.content_type)
+                except Exception:
+                    continue
+                if normalize_subreddit(other) == name:
+                    raise RedditRateLimitError(
+                        f"r/{name} already has a {status} entry "
+                        f"({entry.entry_id}); wait for the interval or pick another subreddit."
+                    )
 
 
 def story_fingerprint(story: Story) -> str:
