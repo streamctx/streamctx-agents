@@ -72,6 +72,11 @@ class ResearchConfig:
     )
     digest_limit: int = 5
     digest_lookback_hours: int = 24
+    classify_delay_seconds: float = 0.25
+    parked_products: tuple[str, ...] = (
+        "AgentLedger",
+        "LiteAgent",
+    )
 
     def interval_for(self, source_type: str) -> int:
         if source_type == "arxiv":

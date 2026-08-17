@@ -463,6 +463,38 @@ class ResearchStore:
             raise KeyError(idea_id)
         return updated
 
+    def list_unclassified(self, *, limit: Optional[int] = None) -> list[ResearchIdea]:
+        """Oldest scored ideas that still need a feature vs new-product label."""
+        sql = (
+            "SELECT * FROM research_ideas "
+            "WHERE classification IS NULL AND composite_score IS NOT NULL "
+            "AND status != ? "
+            "ORDER BY detected_at ASC, idea_id ASC"
+        )
+        params: list[object] = [STATUS_DISMISSED]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_idea(row) for row in rows]
+
+    def set_classification(self, idea_id: str, classification: str) -> ResearchIdea:
+        _validate_enum("classification", classification, CLASSIFICATIONS)
+        idea = self.get_idea(idea_id)
+        if idea is None:
+            raise KeyError(idea_id)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE research_ideas SET classification = ? WHERE idea_id = ?",
+                (classification, idea_id),
+            )
+            self._conn.commit()
+        updated = self.get_idea(idea_id)
+        if updated is None:
+            raise KeyError(idea_id)
+        return updated
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()

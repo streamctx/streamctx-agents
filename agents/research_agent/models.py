@@ -130,6 +130,14 @@ class DigestResult:
 
 
 @dataclass(frozen=True)
+class ClassifyResult:
+    """Outcome of one Stage 5 pass. Independently inspectable in tests."""
+
+    classified: tuple[ResearchIdea, ...]
+    errors: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class SourceItem:
     """A raw paper or repo from a poll, before persistence."""
 

@@ -1,5 +1,5 @@
 """
-Research Agent CLI — poll, hype-filter, gap-map, then daily digest.
+Research Agent CLI — poll, hype-filter, gap-map, digest, then classify.
 
 Usage::
 
@@ -12,6 +12,8 @@ Usage::
     python -m agents.research_agent.research_agent gap-map --limit 10
     python -m agents.research_agent.research_agent digest
     python -m agents.research_agent.research_agent digest --no-notify
+    python -m agents.research_agent.research_agent classify
+    python -m agents.research_agent.research_agent classify --limit 10
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ import sys
 
 from streamctx import get_tracker
 
+from agents.research_agent.classify import run_classify
+from agents.research_agent.classify import summarize as summarize_classify
 from agents.research_agent.digest import run_digest
 from agents.research_agent.digest import summarize as summarize_digest
 from agents.research_agent.gap import run_gap_map
@@ -126,6 +130,27 @@ def cmd_digest(args: argparse.Namespace) -> int:
         tracker.stop()
 
 
+def cmd_classify(args: argparse.Namespace) -> int:
+    tracker = get_tracker(AGENT_IDS["research"])
+    tracker.start()
+    try:
+        tracker.checkpoint()
+        store = ResearchStore(db_path=args.db)
+        try:
+            result = run_classify(store, limit=args.limit)
+        finally:
+            store.close()
+        tracker.checkpoint()
+        print(f"[research-agent] classify {summarize_classify(result)}")
+        for idea in result.classified:
+            print(f"  {idea.classification} {idea.title}")
+        for idea_id, error in result.errors:
+            print(f"  ! {idea_id}: {error}", file=sys.stderr)
+        return 1 if result.errors else 0
+    finally:
+        tracker.stop()
+
+
 def _add_db_limit(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db",
@@ -186,6 +211,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the marketing webhook (still mark items reviewed)",
     )
     digest_parser.set_defaults(func=cmd_digest)
+
+    classify_parser = sub.add_parser(
+        "classify",
+        help="Label scored ideas as feature, new_product, or not_actionable",
+    )
+    _add_db_limit(classify_parser)
+    classify_parser.set_defaults(func=cmd_classify)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

@@ -1,7 +1,9 @@
+from agents.research_agent.classify import run_classify
 from agents.research_agent.digest import run_digest
 from agents.research_agent.gap import run_gap_map
 from agents.research_agent.hype import run_hype_filter
 from agents.research_agent.models import (
+    ClassifyResult,
     DigestResult,
     GapMapResult,
     HypeFilterResult,
@@ -14,6 +16,7 @@ from agents.research_agent.settings import ResearchConfig
 from agents.research_agent.storage import ResearchStore
 
 __all__ = [
+    "ClassifyResult",
     "DigestResult",
     "GapMapResult",
     "HypeFilterResult",
@@ -24,6 +27,7 @@ __all__ = [
     "SourceItem",
     "poll_arxiv",
     "poll_github",
+    "run_classify",
     "run_digest",
     "run_gap_map",
     "run_hype_filter",

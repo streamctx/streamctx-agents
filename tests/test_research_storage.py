@@ -236,3 +236,52 @@ def test_list_digest_candidates_ranks_by_composite_and_set_status(store):
     store.set_status(high.idea_id, STATUS_REVIEWED)
     remaining = store.list_digest_candidates(since="2026-08-16T12:00:00+00:00", limit=5)
     assert [row.idea_id for row in remaining] == [low.idea_id]
+
+
+def test_set_classification_and_list_unclassified(store):
+    from agents.research_agent.models import (
+        CLASSIFICATION_FEATURE,
+        CLASSIFICATION_NEW_PRODUCT,
+        HYPE_TECHNICAL,
+        STATUS_DISMISSED,
+    )
+
+    scored = store.insert_idea(
+        source_url="https://arxiv.org/abs/scored",
+        source_type=SOURCE_TYPE_ARXIV,
+        title="scored",
+        hype_label=HYPE_TECHNICAL,
+        gap_description="gap",
+        feasibility_score=4,
+        pain_match_score=4,
+        novelty_score=4,
+        composite_score=4.0,
+    )
+    store.insert_idea(
+        source_url="https://arxiv.org/abs/unscored",
+        source_type=SOURCE_TYPE_ARXIV,
+        title="unscored",
+        hype_label=HYPE_TECHNICAL,
+    )
+    dismissed = store.insert_idea(
+        source_url="https://arxiv.org/abs/dismissed",
+        source_type=SOURCE_TYPE_ARXIV,
+        title="dismissed",
+        hype_label=HYPE_TECHNICAL,
+        composite_score=3.0,
+        feasibility_score=3,
+        pain_match_score=3,
+        novelty_score=3,
+        gap_description="x",
+        status=STATUS_DISMISSED,
+    )
+    pending = store.list_unclassified()
+    assert [row.idea_id for row in pending] == [scored.idea_id]
+    updated = store.set_classification(scored.idea_id, CLASSIFICATION_FEATURE)
+    assert updated.classification == CLASSIFICATION_FEATURE
+    assert store.list_unclassified() == []
+    with pytest.raises(ValueError, match="classification"):
+        store.set_classification(scored.idea_id, "maybe")
+    assert dismissed.idea_id not in {row.idea_id for row in store.list_unclassified()}
+    store.set_classification(scored.idea_id, CLASSIFICATION_NEW_PRODUCT)
+    assert store.get_idea(scored.idea_id).classification == CLASSIFICATION_NEW_PRODUCT
