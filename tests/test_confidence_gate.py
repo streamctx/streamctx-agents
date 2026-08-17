@@ -23,7 +23,11 @@ from tests.test_diagnose import _seed_drift_failure
 
 @pytest.fixture
 def approval_store(tmp_path):
-    store = PendingApprovalStore(db_path=tmp_path / "coding_agent.db")
+    store = PendingApprovalStore(
+        db_path=tmp_path / "coding_agent.db",
+        notifier=lambda _entry: None,
+        enable_default_notifier=False,
+    )
     yield store
     store.close()
 

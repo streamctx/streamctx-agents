@@ -56,6 +56,7 @@ class PendingApprovalEntry:
     retries_used: int
     status: str
     created_at: str
+    applied_commit: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agents.coding_agent.models import DiagnosisResult, PendingApprovalEntry
 
@@ -21,16 +21,26 @@ STATUS_AUTO_FIX_FAILED = "auto_fix_failed"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
 
+NotifierFn = Callable[[PendingApprovalEntry], None]
+
 
 class PendingApprovalStore:
     """Persists ``pending_approval`` rows in the coding-agent SQLite database."""
 
-    def __init__(self, db_path: Optional[Path | str] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[Path | str] = None,
+        *,
+        notifier: Optional[NotifierFn] = None,
+        enable_default_notifier: bool = True,
+    ) -> None:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._notifier = notifier
+        self._enable_default_notifier = enable_default_notifier
         self._init_db()
 
     def close(self) -> None:
@@ -52,11 +62,23 @@ class PendingApprovalStore:
                     test_results TEXT,
                     retries_used INTEGER,
                     status TEXT,
-                    created_at TIMESTAMP
+                    created_at TIMESTAMP,
+                    applied_commit TEXT
                 );
                 """
             )
+            self._ensure_column("pending_approval", "applied_commit", "TEXT")
             self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        columns = {
+            row[1]
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self._conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+            )
 
     def create_needs_human_review(self, diagnosis: DiagnosisResult) -> PendingApprovalEntry:
         """Record a low-confidence or unclear diagnosis for manual review."""
@@ -89,6 +111,7 @@ class PendingApprovalStore:
         retries_used: int,
         status: str,
         entry_id: Optional[str] = None,
+        applied_commit: Optional[str] = None,
     ) -> PendingApprovalEntry:
         entry_id = entry_id or str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
@@ -100,8 +123,8 @@ class PendingApprovalStore:
                 INSERT INTO pending_approval (
                     entry_id, session_id, root_cause, confidence,
                     matched_pattern_id, diff, regression_test, test_results,
-                    retries_used, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    retries_used, status, created_at, applied_commit
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
@@ -115,11 +138,12 @@ class PendingApprovalStore:
                     retries_used,
                     status,
                     created_at,
+                    applied_commit,
                 ),
             )
             self._conn.commit()
 
-        return PendingApprovalEntry(
+        entry = PendingApprovalEntry(
             entry_id=entry_id,
             session_id=session_id,
             root_cause=root_cause,
@@ -131,7 +155,10 @@ class PendingApprovalStore:
             retries_used=retries_used,
             status=status,
             created_at=created_at,
+            applied_commit=applied_commit,
         )
+        self._dispatch_notification(entry)
+        return entry
 
     def get_entry(self, entry_id: str) -> Optional[PendingApprovalEntry]:
         with self._lock:
@@ -161,6 +188,29 @@ class PendingApprovalStore:
             )
             self._conn.commit()
         return self.get_entry(entry_id)
+
+    def record_applied_commit(
+        self,
+        entry_id: str,
+        commit_sha: str,
+    ) -> Optional[PendingApprovalEntry]:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pending_approval SET applied_commit = ? WHERE entry_id = ?",
+                (commit_sha, entry_id),
+            )
+            self._conn.commit()
+        return self.get_entry(entry_id)
+
+    def _dispatch_notification(self, entry: PendingApprovalEntry) -> None:
+        if self._notifier is not None:
+            self._notifier(entry)
+            return
+        if not self._enable_default_notifier:
+            return
+        from agents.coding_agent.notifications import notify_pending_approval
+
+        notify_pending_approval(entry)
 
 
 def _serialize_test_results(value: Optional[str | dict[str, Any]]) -> Optional[str]:
@@ -199,4 +249,5 @@ def _row_to_entry(row: dict[str, Any]) -> PendingApprovalEntry:
         retries_used=int(row.get("retries_used") or 0),
         status=str(row["status"]),
         created_at=str(row["created_at"]),
+        applied_commit=row.get("applied_commit"),
     )

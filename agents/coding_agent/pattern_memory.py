@@ -29,7 +29,12 @@ class PatternMemory:
         self.pattern_store = pattern_store or FixPatternStore()
         self.approval_store = approval_store or PendingApprovalStore()
 
-    def approve(self, entry_id: str) -> FixPatternMatch:
+    def approve(
+        self,
+        entry_id: str,
+        *,
+        applied_commit: Optional[str] = None,
+    ) -> FixPatternMatch:
         """
         Record human approval: increment ``success_count`` or insert a new pattern.
         """
@@ -48,6 +53,8 @@ class PatternMemory:
             fix_diff_template=diff_template,
         )
         self.approval_store.update_status(entry_id, STATUS_APPROVED)
+        if applied_commit:
+            self.approval_store.record_applied_commit(entry_id, applied_commit)
         return pattern
 
     def reject(self, entry_id: str, reason: str) -> FixPatternMatch:

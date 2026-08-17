@@ -30,7 +30,11 @@ diff --git a/broken_math.py b/broken_math.py
 @pytest.fixture
 def stores(tmp_path):
     db_path = tmp_path / "coding_agent.db"
-    approval_store = PendingApprovalStore(db_path=db_path)
+    approval_store = PendingApprovalStore(
+        db_path=db_path,
+        notifier=lambda _entry: None,
+        enable_default_notifier=False,
+    )
     pattern_store = FixPatternStore(db_path=db_path)
     memory = PatternMemory(
         pattern_store=pattern_store,
@@ -64,12 +68,13 @@ def test_approve_inserts_new_pattern(stores):
     memory, approval_store, pattern_store = stores
     entry = _create_ready_entry(approval_store, signature_hash="sig-new")
 
-    pattern = memory.approve(entry.entry_id)
+    pattern = memory.approve(entry.entry_id, applied_commit="deadbeef")
 
     assert pattern.success_count == 1
     assert pattern.reject_count == 0
     assert pattern.fix_diff_template == FIX_DIFF
     assert approval_store.get_entry(entry.entry_id).status == STATUS_APPROVED
+    assert approval_store.get_entry(entry.entry_id).applied_commit == "deadbeef"
     assert pattern_store.find_match("sig-new") is not None
 
 
