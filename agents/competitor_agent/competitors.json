@@ -1,0 +1,54 @@
+{
+  "user_agent": "streamctx-competitor-agent/0.1",
+  "poll_delay_seconds": 2.0,
+  "pricing_min_interval_seconds": 21600,
+  "github_min_interval_seconds": 3600,
+  "github_per_page": 30,
+  "max_retries": 3,
+  "backoff_base_seconds": 1.0,
+  "max_backoff_seconds": 30.0,
+  "competitors": [
+    {
+      "name": "LangSmith",
+      "pricing_url": "https://www.langchain.com/pricing",
+      "github_repo": null,
+      "rss_url": null,
+      "notes": ""
+    },
+    {
+      "name": "Braintrust",
+      "pricing_url": "https://www.braintrust.dev/pricing",
+      "github_repo": null,
+      "rss_url": null,
+      "notes": ""
+    },
+    {
+      "name": "Langfuse",
+      "pricing_url": "https://langfuse.com/pricing",
+      "github_repo": "langfuse/langfuse",
+      "rss_url": null,
+      "notes": "OSS, ClickHouse-owned"
+    },
+    {
+      "name": "Laminar",
+      "pricing_url": "https://www.lmnr.ai/pricing",
+      "github_repo": null,
+      "rss_url": null,
+      "notes": ""
+    },
+    {
+      "name": "Latitude",
+      "pricing_url": "https://latitude.so/pricing",
+      "github_repo": null,
+      "rss_url": null,
+      "notes": ""
+    },
+    {
+      "name": "Helicone",
+      "pricing_url": "https://www.helicone.ai/pricing",
+      "github_repo": "Helicone/helicone",
+      "rss_url": null,
+      "notes": "OSS, Mintlify-owned"
+    }
+  ]
+}
