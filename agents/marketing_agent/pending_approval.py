@@ -212,6 +212,31 @@ class PendingApprovalStore:
             self._conn.commit()
         return self.get_entry(entry_id)
 
+    def approve(self, entry_id: str) -> PendingApprovalEntry:
+        """Human approval gate — required before any auto-tier ``publish()``."""
+        entry = self.get_entry(entry_id)
+        if entry is None:
+            raise KeyError(entry_id)
+        if entry.status != STATUS_PENDING:
+            raise ValueError(
+                f"cannot approve entry {entry_id} in status {entry.status!r}"
+            )
+        updated = self.update_status(entry_id, STATUS_APPROVED)
+        if updated is None:
+            raise KeyError(entry_id)
+        return updated
+
+    def reject(self, entry_id: str) -> PendingApprovalEntry:
+        entry = self.get_entry(entry_id)
+        if entry is None:
+            raise KeyError(entry_id)
+        if entry.status == STATUS_PUBLISHED:
+            raise ValueError(f"cannot reject already-published entry {entry_id}")
+        updated = self.update_status(entry_id, STATUS_REJECTED)
+        if updated is None:
+            raise KeyError(entry_id)
+        return updated
+
 
 def _validate_enum(name: str, value: str, allowed: frozenset[str]) -> None:
     if value not in allowed:

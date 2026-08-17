@@ -15,6 +15,7 @@ from agents.marketing_agent.adapters.hn import (
     canonical_hn_item_url,
     verify_hn_thread,
 )
+from agents.marketing_agent.adapters.base import DraftOnlyError
 from agents.marketing_agent.adapters.indiehackers import IndieHackersAdapter
 from agents.marketing_agent.adapters.linkedin import LinkedInAdapter
 from agents.marketing_agent.adapters.producthunt import ProductHuntAdapter
@@ -85,6 +86,17 @@ def test_linkedin_format_and_submit_are_draft_only(store, story):
     assert row.status == STATUS_PENDING
     assert row.published_at is None
     assert row.content == content
+
+
+def test_linkedin_publish_raises_draft_only(store, story):
+    adapter = LinkedInAdapter(store)
+    entry_id = adapter.queue(story)
+    with pytest.raises(DraftOnlyError, match="draft_only"):
+        adapter.publish(entry_id)
+    row = store.get_entry(entry_id)
+    assert row is not None
+    assert row.status == STATUS_PENDING
+    assert row.published_at is None
 
 
 def test_indiehackers_and_producthunt_queue(store, story):

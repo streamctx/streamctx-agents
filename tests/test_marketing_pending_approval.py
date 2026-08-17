@@ -9,8 +9,10 @@ import pytest
 from agents.marketing_agent.pending_approval import (
     MODE_DRAFT_ONLY,
     PLATFORM_LINKEDIN,
+    STATUS_APPROVED,
     STATUS_PENDING,
     STATUS_PUBLISHED,
+    STATUS_REJECTED,
     PendingApprovalStore,
 )
 
@@ -90,3 +92,20 @@ def test_update_status_can_mark_published(store):
     assert updated is not None
     assert updated.status == STATUS_PUBLISHED
     assert updated.published_at == "2026-08-17T10:00:00+00:00"
+
+
+def test_approve_and_reject(store):
+    entry = store.create_entry(platform="twitter", content_type="post", content="tweet")
+    approved = store.approve(entry.entry_id)
+    assert approved.status == STATUS_APPROVED
+
+    with pytest.raises(ValueError, match="cannot approve"):
+        store.approve(entry.entry_id)
+
+    rejected = store.reject(entry.entry_id)
+    assert rejected.status == STATUS_REJECTED
+
+    published = store.create_entry(platform="twitter", content_type="post", content="other")
+    store.update_status(published.entry_id, STATUS_PUBLISHED, published_at="2026-08-17T00:00:00+00:00")
+    with pytest.raises(ValueError, match="already-published"):
+        store.reject(published.entry_id)
