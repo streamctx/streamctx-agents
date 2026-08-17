@@ -16,9 +16,14 @@ from typing import Optional
 
 from agents.research_agent.models import (
     CLASSIFICATIONS,
+    HYPE_LABELS,
+    HYPE_MARKETING,
     SOURCE_TYPES,
     STATUSES,
+    STATUS_DISMISSED,
     STATUS_NEW,
+    HypeDiscard,
+    HypeStats,
     ResearchIdea,
 )
 
@@ -38,6 +43,14 @@ class ResearchStore:
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_db()
+
+    def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        columns = {
+            row[1]
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
     def close(self) -> None:
         with self._lock:
@@ -60,7 +73,8 @@ class ResearchStore:
                     classification TEXT,
                     status TEXT,
                     detected_at TIMESTAMP,
-                    content_excerpt TEXT
+                    content_excerpt TEXT,
+                    hype_label TEXT
                 );
 
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_research_ideas_source_url
@@ -76,8 +90,21 @@ class ResearchStore:
                     source_type TEXT PRIMARY KEY,
                     last_polled_at TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS research_hype_discards (
+                    idea_id TEXT PRIMARY KEY,
+                    source_url TEXT,
+                    title TEXT,
+                    discarded_at TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS research_hype_stats (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                );
                 """
             )
+            self._ensure_column("research_ideas", "hype_label", "TEXT")
             self._conn.commit()
 
     def insert_idea(
@@ -96,6 +123,7 @@ class ResearchStore:
         detected_at: Optional[str] = None,
         idea_id: Optional[str] = None,
         content_excerpt: Optional[str] = None,
+        hype_label: Optional[str] = None,
     ) -> ResearchIdea:
         url = _require_text("source_url", source_url)
         _validate_enum("source_type", source_type, SOURCE_TYPES)
@@ -103,6 +131,8 @@ class ResearchStore:
         _validate_enum("status", status, STATUSES)
         if classification is not None:
             _validate_enum("classification", classification, CLASSIFICATIONS)
+        if hype_label is not None:
+            _validate_enum("hype_label", hype_label, HYPE_LABELS)
         idea_id = idea_id or str(uuid.uuid4())
         detected_at = detected_at or _utc_now()
         excerpt = (content_excerpt or "").strip() or None
@@ -115,8 +145,8 @@ class ResearchStore:
                     idea_id, source_url, source_type, title, gap_description,
                     feasibility_score, pain_match_score, novelty_score,
                     composite_score, classification, status, detected_at,
-                    content_excerpt
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_excerpt, hype_label
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     idea_id,
@@ -132,6 +162,7 @@ class ResearchStore:
                     status,
                     detected_at,
                     excerpt,
+                    hype_label,
                 ),
             )
             self._conn.commit()
@@ -150,6 +181,7 @@ class ResearchStore:
             status=status,
             detected_at=detected_at,
             content_excerpt=excerpt,
+            hype_label=hype_label,
         )
 
     def get_idea(self, idea_id: str) -> Optional[ResearchIdea]:
@@ -174,6 +206,8 @@ class ResearchStore:
         *,
         source_type: Optional[str] = None,
         status: Optional[str] = None,
+        hype_label: Optional[str] = None,
+        unfiltered: bool = False,
         since: Optional[str] = None,
         until: Optional[str] = None,
         limit: Optional[int] = None,
@@ -188,6 +222,12 @@ class ResearchStore:
             _validate_enum("status", status, STATUSES)
             clauses.append("status = ?")
             params.append(status)
+        if unfiltered:
+            clauses.append("hype_label IS NULL")
+        elif hype_label is not None:
+            _validate_enum("hype_label", hype_label, HYPE_LABELS)
+            clauses.append("hype_label = ?")
+            params.append(hype_label)
         if since is not None:
             clauses.append("detected_at >= ?")
             params.append(since)
@@ -234,6 +274,104 @@ class ResearchStore:
             self._conn.commit()
         return stamp
 
+    def list_unfiltered(self, *, limit: Optional[int] = None) -> list[ResearchIdea]:
+        """Oldest unlabeled ideas first — Stage 2 input."""
+        sql = (
+            "SELECT * FROM research_ideas WHERE hype_label IS NULL "
+            "ORDER BY detected_at ASC, idea_id ASC"
+        )
+        params: list[object] = []
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_idea(row) for row in rows]
+
+    def apply_hype_label(
+        self,
+        idea_id: str,
+        label: str,
+        *,
+        discarded_at: Optional[str] = None,
+    ) -> ResearchIdea:
+        """Set ``hype_label``. Marketing hype is dismissed and logged for sanity checks."""
+        _validate_enum("hype_label", label, HYPE_LABELS)
+        idea = self.get_idea(idea_id)
+        if idea is None:
+            raise KeyError(idea_id)
+        stamp = discarded_at or _utc_now()
+        new_status = STATUS_DISMISSED if label == HYPE_MARKETING else idea.status
+        with self._lock:
+            self._conn.execute(
+                "UPDATE research_ideas SET hype_label = ?, status = ? WHERE idea_id = ?",
+                (label, new_status, idea_id),
+            )
+            if label == HYPE_MARKETING:
+                self._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO research_hype_discards (
+                        idea_id, source_url, title, discarded_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (idea_id, idea.source_url, idea.title, stamp),
+                )
+                self._bump_stat_unlocked("discarded", 1)
+            else:
+                self._bump_stat_unlocked("kept", 1)
+            self._conn.commit()
+        updated = self.get_idea(idea_id)
+        if updated is None:
+            raise KeyError(idea_id)
+        return updated
+
+    def record_hype_error(self) -> None:
+        with self._lock:
+            self._bump_stat_unlocked("errors", 1)
+            self._conn.commit()
+
+    def hype_stats(self) -> HypeStats:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM research_hype_stats"
+            ).fetchall()
+        counts = {str(row["key"]): int(row["value"]) for row in rows}
+        return HypeStats(
+            kept=counts.get("kept", 0),
+            discarded=counts.get("discarded", 0),
+            errors=counts.get("errors", 0),
+        )
+
+    def list_hype_discards(self, *, limit: Optional[int] = None) -> list[HypeDiscard]:
+        sql = (
+            "SELECT idea_id, source_url, title, discarded_at "
+            "FROM research_hype_discards ORDER BY discarded_at DESC, idea_id DESC"
+        )
+        params: list[object] = []
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            HypeDiscard(
+                idea_id=str(row["idea_id"]),
+                source_url=str(row["source_url"]),
+                title=str(row["title"]),
+                discarded_at=str(row["discarded_at"]),
+            )
+            for row in rows
+        ]
+
+    def _bump_stat_unlocked(self, key: str, delta: int) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO research_hype_stats (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = value + excluded.value
+            """,
+            (key, int(delta)),
+        )
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -256,6 +394,7 @@ def _row_to_idea(row: sqlite3.Row) -> ResearchIdea:
     excerpt = data.get("content_excerpt")
     gap = data.get("gap_description")
     classification = data.get("classification")
+    hype_label = data.get("hype_label")
     return ResearchIdea(
         idea_id=str(data["idea_id"]),
         source_url=str(data["source_url"]),
@@ -270,6 +409,7 @@ def _row_to_idea(row: sqlite3.Row) -> ResearchIdea:
         status=str(data["status"]),
         detected_at=str(data["detected_at"]),
         content_excerpt=str(excerpt) if excerpt else None,
+        hype_label=str(hype_label) if hype_label else None,
     )
 
 

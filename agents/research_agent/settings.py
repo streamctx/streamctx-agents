@@ -50,6 +50,8 @@ class ResearchConfig:
     arxiv_keywords: tuple[str, ...] = DEFAULT_ARXIV_KEYWORDS
     github_topics: tuple[str, ...] = DEFAULT_GITHUB_TOPICS
     skip_github_repos: frozenset[str] = field(default_factory=frozenset)
+    hype_delay_seconds: float = 0.25
+    hype_excerpt_chars: int = 800
 
     def interval_for(self, source_type: str) -> int:
         if source_type == "arxiv":

@@ -32,6 +32,8 @@ def test_tables_and_columns_match_schema(store, tmp_path):
         }
         assert "research_ideas" in tables
         assert "research_poll_state" in tables
+        assert "research_hype_discards" in tables
+        assert "research_hype_stats" in tables
 
         idea_cols = {
             col[1]
@@ -51,6 +53,7 @@ def test_tables_and_columns_match_schema(store, tmp_path):
             "status",
             "detected_at",
             "content_excerpt",
+            "hype_label",
         }
 
         pk = [
@@ -137,3 +140,32 @@ def test_poll_state_round_trip(store):
     assert store.last_polled_at(SOURCE_TYPE_ARXIV) == "2026-08-17T12:00:00+00:00"
     store.set_last_polled_at(SOURCE_TYPE_ARXIV, "2026-08-17T18:00:00+00:00")
     assert store.last_polled_at(SOURCE_TYPE_ARXIV) == "2026-08-17T18:00:00+00:00"
+
+
+def test_apply_hype_label_dismisses_marketing_and_counts(store):
+    from agents.research_agent.models import HYPE_MARKETING, HYPE_TECHNICAL, STATUS_DISMISSED
+
+    kept = store.insert_idea(
+        source_url="https://arxiv.org/abs/keep",
+        source_type=SOURCE_TYPE_ARXIV,
+        title="Causal attribution in multi-agent traces",
+    )
+    hype = store.insert_idea(
+        source_url="https://github.com/acme/launch",
+        source_type=SOURCE_TYPE_GITHUB,
+        title="We raised $20M to 10x your agents",
+    )
+    store.apply_hype_label(kept.idea_id, HYPE_TECHNICAL)
+    store.apply_hype_label(hype.idea_id, HYPE_MARKETING, discarded_at="2026-08-17T12:00:00+00:00")
+
+    assert store.get_idea(kept.idea_id).hype_label == HYPE_TECHNICAL
+    assert store.get_idea(kept.idea_id).status == STATUS_NEW
+    dismissed = store.get_idea(hype.idea_id)
+    assert dismissed.hype_label == HYPE_MARKETING
+    assert dismissed.status == STATUS_DISMISSED
+    assert store.list_unfiltered() == []
+    stats = store.hype_stats()
+    assert (stats.kept, stats.discarded, stats.errors) == (1, 1, 0)
+    discards = store.list_hype_discards()
+    assert len(discards) == 1
+    assert discards[0].title == "We raised $20M to 10x your agents"

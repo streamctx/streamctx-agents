@@ -48,6 +48,10 @@ CLASSIFICATIONS = frozenset(
     }
 )
 
+HYPE_TECHNICAL = "technical_substance"
+HYPE_MARKETING = "marketing_hype"
+HYPE_LABELS = frozenset({HYPE_TECHNICAL, HYPE_MARKETING})
+
 
 @dataclass(frozen=True)
 class ResearchIdea:
@@ -66,6 +70,34 @@ class ResearchIdea:
     status: str
     detected_at: str
     content_excerpt: Optional[str] = None
+    hype_label: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class HypeStats:
+    """Running totals so the hype filter can be sanity-checked."""
+
+    kept: int
+    discarded: int
+    errors: int
+
+
+@dataclass(frozen=True)
+class HypeDiscard:
+    idea_id: str
+    source_url: str
+    title: str
+    discarded_at: str
+
+
+@dataclass(frozen=True)
+class HypeFilterResult:
+    """Outcome of one Stage 2 pass. Independently inspectable in tests."""
+
+    kept: tuple[ResearchIdea, ...]
+    discarded: tuple[ResearchIdea, ...]
+    errors: tuple[tuple[str, str], ...]
+    stats: HypeStats
 
 
 @dataclass(frozen=True)
