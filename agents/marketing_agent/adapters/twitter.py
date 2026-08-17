@@ -79,8 +79,9 @@ class TwitterAdapter(AutoAdapter):
         content_type: str = "post",
         http: Optional[JsonHttpClient] = None,
         credentials: Optional[TwitterCredentials] = None,
+        safety=None,
     ) -> None:
-        super().__init__(store, content_type=content_type)
+        super().__init__(store, content_type=content_type, safety=safety)
         self.http = http or JsonHttpClient()
         self.credentials = credentials if credentials is not None else TwitterCredentials.from_env()
 

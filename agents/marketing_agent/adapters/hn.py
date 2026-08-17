@@ -57,8 +57,9 @@ class HackerNewsAdapter(DraftAdapter):
         *,
         content_type: str = CONTENT_POST,
         fetch_page: Optional[FetchPage] = None,
+        safety=None,
     ) -> None:
-        super().__init__(store, content_type=content_type)
+        super().__init__(store, content_type=content_type, safety=safety)
         self.fetch_page = fetch_page or fetch_hn_item_page
 
     def format(self, story: Story, target: Optional[str] = None) -> str:
@@ -69,10 +70,10 @@ class HackerNewsAdapter(DraftAdapter):
             text = _format_hn_post(story)
         return text
 
-    def submit(self, content: str, target: Optional[str] = None) -> str:
+    def submit(self, content: str, target: Optional[str] = None, **kwargs) -> str:
         if self.content_type == CONTENT_COMMENT:
             target = verify_hn_thread(target, fetch_page=self.fetch_page)
-        return super().submit(content, target=target)
+        return super().submit(content, target=target, **kwargs)
 
 
 def verify_hn_thread(

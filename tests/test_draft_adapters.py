@@ -16,6 +16,7 @@ from agents.marketing_agent.adapters.hn import (
     verify_hn_thread,
 )
 from agents.marketing_agent.adapters.base import DraftOnlyError
+from agents.marketing_agent.safety import DuplicateContentError
 from agents.marketing_agent.adapters.indiehackers import IndieHackersAdapter
 from agents.marketing_agent.adapters.linkedin import LinkedInAdapter
 from agents.marketing_agent.adapters.producthunt import ProductHuntAdapter
@@ -100,18 +101,18 @@ def test_linkedin_publish_raises_draft_only(store, story):
 
 
 def test_indiehackers_and_producthunt_queue(store, story):
-    ih_id = IndieHackersAdapter(store).queue(story)
-    ph_id = ProductHuntAdapter(store).queue(story)
-
-    ih = store.get_entry(ih_id)
-    ph = store.get_entry(ph_id)
-    assert ih is not None and ph is not None
-    assert ih.platform == "indiehackers"
-    assert ph.platform == "producthunt"
-    assert ih.mode == ph.mode == MODE_DRAFT_ONLY
-    assert "What changed:" in ih.content
-    assert ph.content.splitlines()[0]
-    assert "• " in ph.content
+    ih = IndieHackersAdapter(store)
+    ph = ProductHuntAdapter(store)
+    ih_id = ih.queue(story)
+    ih_row = store.get_entry(ih_id)
+    assert ih_row is not None
+    assert ih_row.platform == "indiehackers"
+    assert "What changed:" in ih_row.content
+    formatted = ph.format(story)
+    assert formatted.splitlines()[0]
+    assert "• " in formatted
+    with pytest.raises(DuplicateContentError, match="Stagger"):
+        ph.queue(story)
 
 
 def test_hn_post_does_not_fetch_or_pitch(store, story):
@@ -215,28 +216,22 @@ def test_verify_hn_thread_requires_reply_href():
         verify_hn_thread(HN_ITEM, fetch_page=_locked_fetch)
 
 
-def test_changelog_story_through_all_draft_adapters(store, story):
-    """End-to-end: Stage 1 story → four draft_only pending rows."""
-    adapters = [
-        LinkedInAdapter(store),
-        IndieHackersAdapter(store),
-        ProductHuntAdapter(store),
-        HackerNewsAdapter(store, content_type=CONTENT_COMMENT, fetch_page=_open_fetch),
-    ]
-    targets = [None, None, None, HN_ITEM]
-    ids = [
-        adapter.queue(story, target=target)
-        for adapter, target in zip(adapters, targets)
-    ]
-    assert len(ids) == 4
+def test_changelog_story_is_staggered_across_platforms(store, story):
+    """Same story cannot enter the queue on two platforms the same day."""
+    linkedin = LinkedInAdapter(store)
+    first = linkedin.queue(story)
+    row = store.get_entry(first)
+    assert row is not None
+    assert row.platform == "linkedin"
+    assert row.status == STATUS_PENDING
+    assert row.source_fingerprint
+
+    with pytest.raises(DuplicateContentError, match="linkedin"):
+        IndieHackersAdapter(store).queue(story)
+    with pytest.raises(DuplicateContentError):
+        HackerNewsAdapter(
+            store, content_type=CONTENT_COMMENT, fetch_page=_open_fetch
+        ).queue(story, target=HN_ITEM)
+
     pending = store.list_by_status(STATUS_PENDING)
-    assert len(pending) == 4
-    assert {row.platform for row in pending} == {
-        "linkedin",
-        "indiehackers",
-        "producthunt",
-        "hn",
-    }
-    assert all(row.mode == MODE_DRAFT_ONLY for row in pending)
-    assert all(row.status == STATUS_PENDING for row in pending)
-    assert all(row.published_at is None for row in pending)
+    assert len(pending) == 1

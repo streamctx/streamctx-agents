@@ -14,7 +14,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from agents.marketing_agent.models import PendingApprovalEntry
 
@@ -89,11 +89,21 @@ class PendingApprovalStore:
                     mode TEXT,
                     status TEXT,
                     created_at TIMESTAMP,
-                    published_at TIMESTAMP
+                    published_at TIMESTAMP,
+                    source_fingerprint TEXT
                 );
                 """
             )
+            self._ensure_column("pending_approval", "source_fingerprint", "TEXT")
             self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        columns = {
+            row[1]
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
     def create_entry(
         self,
@@ -106,6 +116,8 @@ class PendingApprovalStore:
         status: str = STATUS_PENDING,
         entry_id: Optional[str] = None,
         published_at: Optional[str] = None,
+        source_fingerprint: Optional[str] = None,
+        created_at: Optional[str] = None,
     ) -> PendingApprovalEntry:
         _validate_enum("platform", platform, PLATFORMS)
         _validate_enum("content_type", content_type, CONTENT_TYPES)
@@ -115,16 +127,19 @@ class PendingApprovalStore:
             raise ValueError("content is empty")
 
         entry_id = entry_id or str(uuid.uuid4())
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = created_at or datetime.now(timezone.utc).isoformat()
         target_value = target.strip() if target and target.strip() else None
+        fingerprint = (
+            source_fingerprint.strip() if source_fingerprint and source_fingerprint.strip() else None
+        )
 
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO pending_approval (
                     entry_id, platform, content_type, content, target,
-                    mode, status, created_at, published_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mode, status, created_at, published_at, source_fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
@@ -136,6 +151,7 @@ class PendingApprovalStore:
                     status,
                     created_at,
                     published_at,
+                    fingerprint,
                 ),
             )
             self._conn.commit()
@@ -150,6 +166,7 @@ class PendingApprovalStore:
             status=status,
             created_at=created_at,
             published_at=published_at,
+            source_fingerprint=fingerprint,
         )
 
     def get_entry(self, entry_id: str) -> Optional[PendingApprovalEntry]:
@@ -212,6 +229,27 @@ class PendingApprovalStore:
             self._conn.commit()
         return self.get_entry(entry_id)
 
+    def list_on_utc_day(
+        self,
+        day: str,
+        *,
+        statuses: Optional[Sequence[str]] = None,
+    ) -> list[PendingApprovalEntry]:
+        """Rows whose UTC ``created_at`` falls on ``YYYY-MM-DD``."""
+        allowed = tuple(statuses) if statuses is not None else tuple(STATUSES)
+        placeholders = ",".join("?" for _ in allowed)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM pending_approval
+                WHERE created_at LIKE ?
+                  AND status IN ({placeholders})
+                ORDER BY created_at DESC
+                """,
+                (f"{day}%", *allowed),
+            ).fetchall()
+        return [_row_to_entry(row) for row in rows]
+
     def approve(self, entry_id: str) -> PendingApprovalEntry:
         """Human approval gate — required before any auto-tier ``publish()``."""
         entry = self.get_entry(entry_id)
@@ -255,4 +293,5 @@ def _row_to_entry(row: sqlite3.Row) -> PendingApprovalEntry:
         status=str(data["status"]),
         created_at=str(data["created_at"]),
         published_at=data.get("published_at"),
+        source_fingerprint=data.get("source_fingerprint"),
     )

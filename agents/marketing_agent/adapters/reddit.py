@@ -80,8 +80,9 @@ class RedditAdapter(AutoAdapter):
         credentials: Optional[RedditCredentials] = None,
         limiter: Optional[RedditRateLimiter] = None,
         access_token: Optional[str] = None,
+        safety=None,
     ) -> None:
-        super().__init__(store, content_type=content_type)
+        super().__init__(store, content_type=content_type, safety=safety)
         self.http = http or JsonHttpClient(
             user_agent=(credentials.user_agent if credentials else REDDIT_USER_AGENT)
         )
@@ -94,10 +95,10 @@ class RedditAdapter(AutoAdapter):
             return _format_reddit_comment(story)
         return _format_reddit_post(story)
 
-    def submit(self, content: str, target: Optional[str] = None) -> str:
+    def submit(self, content: str, target: Optional[str] = None, **kwargs) -> str:
         if not target or not str(target).strip():
             raise ValueError("Reddit submit requires a target subreddit (or comment permalink)")
-        return super().submit(content, target=target)
+        return super().submit(content, target=target, **kwargs)
 
     def _deliver(self, entry: PendingApprovalEntry) -> None:
         subreddit, thing_id = parse_reddit_target(entry.target, entry.content_type)

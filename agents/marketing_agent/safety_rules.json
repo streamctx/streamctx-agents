@@ -1,0 +1,43 @@
+{
+  "self_promo": {
+    "platforms": ["hn", "reddit"],
+    "threshold": 2.0,
+    "max_product_mentions": 1,
+    "extra_mention_weight": 1.0,
+    "on_fail": "rewrite",
+    "product_names": ["streamctx", "stream ctx"],
+    "product_mention_rewrite": "it",
+    "phrases": [
+      {"pattern": "check out (our|my|this)", "weight": 2.5},
+      {"pattern": "please (upvote|like|share|follow)", "weight": 3.0},
+      {"pattern": "follow us", "weight": 2.5},
+      {"pattern": "show hn\\b", "weight": 2.0},
+      {"pattern": "we just (launched|shipped|released|dropped)", "weight": 2.5},
+      {"pattern": "\\b(i|we) built (this|a|our)", "weight": 1.5},
+      {"pattern": "our (new )?(library|sdk|tool|product|startup)", "weight": 2.0},
+      {"pattern": "try (our|my) ", "weight": 2.0},
+      {"pattern": "star (us|the repo) on github", "weight": 2.5},
+      {"pattern": "give us a (star|follow)", "weight": 2.5},
+      {"pattern": "plug for ", "weight": 2.0},
+      {"pattern": "shameless plug", "weight": 3.0}
+    ],
+    "rewrite_replacements": [
+      {"pattern": "check out (our|my|this)\\s+", "replace": ""},
+      {"pattern": "please (upvote|like|share|follow)\\b[^.!]*[.!]?", "replace": ""},
+      {"pattern": "follow us\\b[^.!]*[.!]?", "replace": ""},
+      {"pattern": "show hn:\\s*", "replace": ""},
+      {"pattern": "we just (launched|shipped|released|dropped)\\s+", "replace": ""},
+      {"pattern": "try (our|my)\\s+", "replace": ""},
+      {"pattern": "shameless plug[:\\s]*", "replace": ""},
+      {"pattern": "star (us|the repo) on github[^.!]*[.!]?", "replace": ""},
+      {"pattern": "give us a (star|follow)[^.!]*[.!]?", "replace": ""}
+    ]
+  },
+  "duplicate": {
+    "enabled": true,
+    "similarity_threshold": 0.82,
+    "min_normalized_chars": 40,
+    "block_same_platform": false,
+    "compare_statuses": ["pending", "approved", "published"]
+  }
+}

@@ -44,6 +44,7 @@ def test_pending_approval_table_schema(store, tmp_path):
             "status",
             "created_at",
             "published_at",
+            "source_fingerprint",
         }
     finally:
         conn.close()

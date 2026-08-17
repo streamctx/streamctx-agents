@@ -33,6 +33,7 @@ class PendingApprovalEntry:
     status: str
     created_at: str
     published_at: Optional[str] = None
+    source_fingerprint: Optional[str] = None
 
 
 @dataclass(frozen=True)

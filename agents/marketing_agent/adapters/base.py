@@ -20,6 +20,7 @@ from agents.marketing_agent.pending_approval import (
     STATUS_PUBLISHED,
     PendingApprovalStore,
 )
+from agents.marketing_agent.safety import SafetyGate, story_fingerprint
 
 
 class PublishError(RuntimeError):
@@ -45,29 +46,53 @@ class DraftAdapter(ABC):
         store: PendingApprovalStore,
         *,
         content_type: str = CONTENT_POST,
+        safety: Optional[SafetyGate] = None,
     ) -> None:
         self.store = store
         self.content_type = content_type
+        self.safety = safety
+
+    def _safety(self) -> SafetyGate:
+        if self.safety is None:
+            self.safety = SafetyGate.default()
+        return self.safety
 
     @abstractmethod
     def format(self, story: Story, target: Optional[str] = None) -> str:
         """Platform-specific tone/length adaptation."""
 
-    def submit(self, content: str, target: Optional[str] = None) -> str:
-        """Write a pending_approval row and return its entry_id."""
+    def submit(
+        self,
+        content: str,
+        target: Optional[str] = None,
+        *,
+        fingerprint: Optional[str] = None,
+    ) -> str:
+        """Write a pending_approval row after safety checks. Never posts."""
+        prepared = self._safety().prepare(
+            content,
+            platform=self.platform,
+            store=self.store,
+            fingerprint=fingerprint,
+        )
         entry = self.store.create_entry(
             platform=self.platform,
             content_type=self.content_type,
-            content=content,
+            content=prepared,
             target=target,
             mode=self.mode,
             status=STATUS_PENDING,
+            source_fingerprint=fingerprint,
         )
         return entry.entry_id
 
     def queue(self, story: Story, target: Optional[str] = None) -> str:
         """format() then submit() — still pending; never hits a platform API."""
-        return self.submit(self.format(story, target=target), target=target)
+        return self.submit(
+            self.format(story, target=target),
+            target=target,
+            fingerprint=story_fingerprint(story),
+        )
 
     def publish(self, entry_id: str) -> PendingApprovalEntry:
         """Draft-tier platforms cannot auto-post."""

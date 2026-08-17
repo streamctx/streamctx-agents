@@ -34,8 +34,9 @@ class DevToAdapter(AutoAdapter):
         content_type: str = "post",
         http: Optional[JsonHttpClient] = None,
         api_key: Optional[str] = None,
+        safety=None,
     ) -> None:
-        super().__init__(store, content_type=content_type)
+        super().__init__(store, content_type=content_type, safety=safety)
         self.http = http or JsonHttpClient()
         self.api_key = api_key if api_key is not None else DEVTO_API_KEY
 
