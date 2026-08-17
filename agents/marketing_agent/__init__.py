@@ -14,6 +14,11 @@ from agents.marketing_agent.outreach import (
     search_reddit,
     search_twitter,
 )
+from agents.marketing_agent.notifications import (
+    notify_pending_approval,
+    notify_text,
+    post_webhook,
+)
 from agents.marketing_agent.pending_approval import PendingApprovalStore
 from agents.marketing_agent.safety import (
     DuplicateContentError,
@@ -42,6 +47,9 @@ __all__ = [
     "OutreachRules",
     "PendingApprovalEntry",
     "PendingApprovalStore",
+    "notify_pending_approval",
+    "notify_text",
+    "post_webhook",
     "ProductHuntAdapter",
     "PublicPost",
     "RedditAdapter",

@@ -12,6 +12,11 @@
   "twitter_min_likes": 30,
   "producthunt_min_votes": 40,
   "mentions_enabled": true,
+  "roadmap": [
+    "Task Verification Auto-Checker",
+    "Runaway Cost Circuit Breaker",
+    "Multi-Agent Handoff Attribution"
+  ],
   "github_per_page": 30,
   "max_retries": 3,
   "backoff_base_seconds": 1.0,

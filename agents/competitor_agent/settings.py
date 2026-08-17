@@ -46,6 +46,11 @@ class CompetitorConfig:
     max_retries: int = 3
     backoff_base_seconds: float = 1.0
     max_backoff_seconds: float = 30.0
+    roadmap: tuple[str, ...] = (
+        "Task Verification Auto-Checker",
+        "Runaway Cost Circuit Breaker",
+        "Multi-Agent Handoff Attribution",
+    )
 
     def by_name(self, name: str) -> CompetitorSource:
         key = name.strip().lower()
@@ -109,6 +114,7 @@ class CompetitorConfig:
             max_retries=int(data.get("max_retries", 3)),
             backoff_base_seconds=float(data.get("backoff_base_seconds", 1.0)),
             max_backoff_seconds=float(data.get("max_backoff_seconds", 30.0)),
+            roadmap=_load_roadmap(data.get("roadmap")),
         )
 
 
@@ -147,3 +153,17 @@ def _as_bool(value: object) -> bool:
         return value
     text = str(value).strip().lower()
     return text in {"1", "true", "yes", "on"}
+
+
+DEFAULT_ROADMAP = (
+    "Task Verification Auto-Checker",
+    "Runaway Cost Circuit Breaker",
+    "Multi-Agent Handoff Attribution",
+)
+
+
+def _load_roadmap(value: object) -> tuple[str, ...]:
+    if not value:
+        return DEFAULT_ROADMAP
+    items = tuple(str(item).strip() for item in value if str(item).strip())
+    return items or DEFAULT_ROADMAP

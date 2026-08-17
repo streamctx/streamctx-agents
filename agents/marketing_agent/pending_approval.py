@@ -14,7 +14,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from agents.marketing_agent.models import PendingApprovalEntry
 
@@ -60,16 +60,26 @@ STATUSES = frozenset(
     {STATUS_PENDING, STATUS_APPROVED, STATUS_REJECTED, STATUS_PUBLISHED}
 )
 
+NotifierFn = Callable[["PendingApprovalEntry"], None]
+
 
 class PendingApprovalStore:
     """Persists marketing ``pending_approval`` rows."""
 
-    def __init__(self, db_path: Optional[Path | str] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[Path | str] = None,
+        *,
+        notifier: Optional[NotifierFn] = None,
+        enable_default_notifier: bool = True,
+    ) -> None:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._notifier = notifier
+        self._enable_default_notifier = enable_default_notifier
         self._init_db()
 
     def close(self) -> None:
@@ -156,7 +166,7 @@ class PendingApprovalStore:
             )
             self._conn.commit()
 
-        return PendingApprovalEntry(
+        entry = PendingApprovalEntry(
             entry_id=entry_id,
             platform=platform,
             content_type=content_type,
@@ -168,6 +178,8 @@ class PendingApprovalStore:
             published_at=published_at,
             source_fingerprint=fingerprint,
         )
+        self._dispatch_notification(entry)
+        return entry
 
     def get_entry(self, entry_id: str) -> Optional[PendingApprovalEntry]:
         with self._lock:
@@ -274,6 +286,16 @@ class PendingApprovalStore:
         if updated is None:
             raise KeyError(entry_id)
         return updated
+
+    def _dispatch_notification(self, entry: PendingApprovalEntry) -> None:
+        if self._notifier is not None:
+            self._notifier(entry)
+            return
+        if not self._enable_default_notifier:
+            return
+        from agents.marketing_agent.notifications import notify_pending_approval
+
+        notify_pending_approval(entry)
 
 
 def _validate_enum(name: str, value: str, allowed: frozenset[str]) -> None:
