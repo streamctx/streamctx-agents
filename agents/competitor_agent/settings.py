@@ -29,6 +29,7 @@ class CompetitorConfig:
     poll_delay_seconds: float = 2.0
     pricing_min_interval_seconds: int = 21600
     github_min_interval_seconds: int = 3600
+    rss_min_interval_seconds: int = 10800
     github_per_page: int = 30
     max_retries: int = 3
     backoff_base_seconds: float = 1.0
@@ -49,6 +50,9 @@ class CompetitorConfig:
 
     def with_github(self) -> tuple[CompetitorSource, ...]:
         return tuple(item for item in self.competitors if item.github_repo)
+
+    def with_rss(self) -> tuple[CompetitorSource, ...]:
+        return tuple(item for item in self.competitors if item.rss_url)
 
     @classmethod
     def load(cls, path: Optional[Path | str] = None) -> CompetitorConfig:
@@ -75,6 +79,7 @@ class CompetitorConfig:
             poll_delay_seconds=float(data.get("poll_delay_seconds", 2.0)),
             pricing_min_interval_seconds=int(data.get("pricing_min_interval_seconds", 21600)),
             github_min_interval_seconds=int(data.get("github_min_interval_seconds", 3600)),
+            rss_min_interval_seconds=int(data.get("rss_min_interval_seconds", 10800)),
             github_per_page=int(data.get("github_per_page", 30)),
             max_retries=int(data.get("max_retries", 3)),
             backoff_base_seconds=float(data.get("backoff_base_seconds", 1.0)),

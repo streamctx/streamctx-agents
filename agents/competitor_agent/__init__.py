@@ -7,6 +7,7 @@ from agents.competitor_agent.settings import CompetitorConfig, CompetitorSource
 from agents.competitor_agent.snapshot import (
     poll_github_releases,
     poll_pricing,
+    poll_rss,
     run_snapshot_poll,
     snapshot_and_diff,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "WeeklyReport",
     "poll_github_releases",
     "poll_pricing",
+    "poll_rss",
     "run_snapshot_poll",
     "snapshot_and_diff",
 ]

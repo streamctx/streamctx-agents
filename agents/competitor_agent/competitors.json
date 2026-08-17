@@ -3,6 +3,7 @@
   "poll_delay_seconds": 2.0,
   "pricing_min_interval_seconds": 21600,
   "github_min_interval_seconds": 3600,
+  "rss_min_interval_seconds": 10800,
   "github_per_page": 30,
   "max_retries": 3,
   "backoff_base_seconds": 1.0,
@@ -12,7 +13,7 @@
       "name": "LangSmith",
       "pricing_url": "https://www.langchain.com/pricing",
       "github_repo": null,
-      "rss_url": null,
+      "rss_url": "https://blog.langchain.com/rss.xml",
       "notes": ""
     },
     {
@@ -47,7 +48,7 @@
       "name": "Helicone",
       "pricing_url": "https://www.helicone.ai/pricing",
       "github_repo": "Helicone/helicone",
-      "rss_url": null,
+      "rss_url": "https://blog.helicone.ai/feed",
       "notes": "OSS, Mintlify-owned"
     }
   ]

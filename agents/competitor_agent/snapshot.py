@@ -1,9 +1,10 @@
-"""Pricing-page and GitHub-release snapshot/diff.
+"""Pricing, GitHub-release, and RSS/Atom snapshot/diff.
 
 ``snapshot_and_diff`` is the shared primitive: fetch, hash, compare against
 the last ``competitor_snapshots`` row, persist on change, optionally emit
 one ``competitor_signals`` row. Pricing uses an LLM for a 1-2 line summary;
-GitHub release notes are stored as-is (one signal per new tag).
+GitHub release notes and RSS entries are stored as short human-readable
+summaries (one signal per new tag or post).
 """
 
 from __future__ import annotations
@@ -25,11 +26,19 @@ from agents.competitor_agent.http import (
     github_headers,
 )
 from agents.competitor_agent.models import (
+    SIGNAL_TYPE_NEW_POST,
     SIGNAL_TYPE_NEW_RELEASE,
     SIGNAL_TYPE_PRICING_CHANGE,
+    SNAPSHOT_TYPE_CHANGELOG,
     SNAPSHOT_TYPE_GITHUB_RELEASE,
     SNAPSHOT_TYPE_PRICING,
     CompetitorSignal,
+)
+from agents.competitor_agent.rss import (
+    parse_feed,
+    parse_serialized_entries,
+    serialize_feed_entries,
+    summarize_serialized,
 )
 from agents.competitor_agent.settings import (
     CompetitorConfig,
@@ -56,7 +65,13 @@ GITHUB_RELEASES_URL = "https://api.github.com/repos/{repo}/releases?per_page={pe
 _SIGNAL_FOR_SNAPSHOT = {
     SNAPSHOT_TYPE_PRICING: SIGNAL_TYPE_PRICING_CHANGE,
     SNAPSHOT_TYPE_GITHUB_RELEASE: SIGNAL_TYPE_NEW_RELEASE,
+    SNAPSHOT_TYPE_CHANGELOG: SIGNAL_TYPE_NEW_POST,
 }
+
+RSS_ACCEPT = (
+    "application/rss+xml, application/atom+xml, application/xml, "
+    "text/xml;q=0.9, */*;q=0.8"
+)
 
 
 @dataclass(frozen=True)
@@ -269,6 +284,61 @@ def poll_github_releases(
     return signals
 
 
+def poll_rss(
+    competitor: CompetitorSource,
+    *,
+    store: CompetitorStore,
+    config: CompetitorConfig,
+    fetch_fn: Optional[FetchFn] = None,
+    sleep_fn: Optional[SleepFn] = None,
+    now_fn: Optional[NowFn] = None,
+) -> list[CompetitorSignal]:
+    """Poll an RSS/Atom feed and emit one ``new_post`` signal per new entry."""
+    if not competitor.rss_url:
+        return []
+
+    def _fetch() -> str:
+        xml = fetch_text(
+            competitor.rss_url or "",
+            headers={"User-Agent": config.user_agent, "Accept": RSS_ACCEPT},
+            max_retries=config.max_retries,
+            backoff_base_seconds=config.backoff_base_seconds,
+            max_backoff_seconds=config.max_backoff_seconds,
+            sleep_fn=sleep_fn,
+        )
+        return serialize_feed_entries(parse_feed(xml))
+
+    previous, current, skipped = capture_snapshot(
+        competitor.name,
+        SNAPSHOT_TYPE_CHANGELOG,
+        fetch_fn or _fetch,
+        store=store,
+        min_interval_seconds=config.rss_min_interval_seconds,
+        now_fn=now_fn,
+    )
+    if skipped or current is None or previous is None:
+        return []
+    if content_hash(previous) == content_hash(current):
+        return []
+
+    old_ids = {str(item.get("id") or "") for item in parse_serialized_entries(previous)}
+    signals: list[CompetitorSignal] = []
+    for row in parse_serialized_entries(current):
+        entry_id = str(row.get("id") or "")
+        if not entry_id or entry_id in old_ids:
+            continue
+        link = str(row.get("link") or "").strip() or None
+        signals.append(
+            store.insert_signal(
+                competitor=competitor.name,
+                signal_type=SIGNAL_TYPE_NEW_POST,
+                summary=summarize_serialized(row),
+                source_url=link,
+            )
+        )
+    return signals
+
+
 def run_snapshot_poll(
     store: CompetitorStore,
     *,
@@ -278,7 +348,7 @@ def run_snapshot_poll(
     now_fn: Optional[NowFn] = None,
     token: Optional[str] = None,
 ) -> SnapshotPollResult:
-    """Walk the config list: pricing pages, then GitHub repos, with inter-call delay."""
+    """Walk the config list: pricing, GitHub, then RSS, with inter-call delay."""
     spec = config or CompetitorConfig.load()
     sleeper = sleep_fn or time.sleep
     signals: list[CompetitorSignal] = []
@@ -339,6 +409,29 @@ def run_snapshot_poll(
             )
         except Exception as exc:
             errors.append((f"{item.name}:github_release", str(exc)))
+
+    for item in spec.with_rss():
+        try:
+            before = store.latest_snapshot(item.name, SNAPSHOT_TYPE_CHANGELOG)
+            if before is not None and _too_soon(
+                before.captured_at,
+                spec.rss_min_interval_seconds,
+                (now_fn or (lambda: datetime.now(timezone.utc)))(),
+            ):
+                skipped.append(f"{item.name}:changelog")
+                continue
+            _pace()
+            signals.extend(
+                poll_rss(
+                    item,
+                    store=store,
+                    config=spec,
+                    sleep_fn=sleep_fn,
+                    now_fn=now_fn,
+                )
+            )
+        except Exception as exc:
+            errors.append((f"{item.name}:changelog", str(exc)))
 
     return SnapshotPollResult(
         signals=tuple(signals),
@@ -462,7 +555,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Poll competitor pricing pages and GitHub releases."
+        description="Poll competitor pricing pages, GitHub releases, and RSS feeds."
     )
     parser.add_argument("--config", help="Path to competitors.json")
     parser.add_argument(

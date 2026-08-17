@@ -90,6 +90,10 @@ def test_shipped_config_lists_six_competitors_without_code_names():
         spec.by_name("Langfuse"),
         spec.by_name("Helicone"),
     )
+    assert spec.with_rss() == (
+        spec.by_name("LangSmith"),
+        spec.by_name("Helicone"),
+    )
     assert all(item.pricing_url for item in spec.with_pricing())
 
 
