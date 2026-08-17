@@ -62,8 +62,15 @@ def test_generate_story_from_changelog_entry():
     assert isinstance(story, Story)
     assert story.headline.startswith("0.4.4:")
     assert "wrap()" in story.headline
+    assert "…" not in story.headline
+    assert "_originals" in story.headline
     assert len(story.key_facts) == 1
-    assert "#5" in story.proof_point or "(#5)" in story.proof_point
+    assert "get_stats()" in story.key_facts[0]
+    assert "getstats()" not in story.key_facts[0]
+    assert "_originals" in story.key_facts[0]
+    assert "get_stats()" in story.proof_point
+    assert "#5" in story.proof_point
+    assert story.proof_point.strip() not in {"#5", "(#5)", "(#5)."}
     assert "bugfix" in story.tone_tags
     assert "from_changelog" in story.tone_tags
     assert "community_safe" in story.tone_tags
@@ -141,7 +148,8 @@ def test_parse_real_product_changelog():
     assert entries
     assert entries[0].version
     story = generate_story(entries[0])
-    assert story.headline
-    assert story.key_facts
-    assert story.proof_point
+    assert "…" not in story.headline
+    assert "get_stats()" in " ".join(story.key_facts)
+    assert "getstats()" not in " ".join(story.key_facts)
+    assert story.proof_point.strip() not in {"#5", "(#5)", "(#5)."}
     assert story.tone_tags

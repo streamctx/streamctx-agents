@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, Union
+from typing import Any, Mapping, Match, Optional, Union
 
 from agents.marketing_agent.models import CHANGELOG_KIND, COMMIT_KIND, SourceData, Story
 
 SourceInput = Union[SourceData, Mapping[str, Any]]
 
-HEADLINE_MAX_CHARS = 90
+HEADLINE_MAX_CHARS = 140
 PROOF_MAX_CHARS = 220
 
 PROOF_PATTERNS = (
@@ -46,7 +46,12 @@ CONVENTIONAL_RE = re.compile(
     r"^[a-z]+(?:\([^)]+\))?!?:\s*(.+)$",
     re.IGNORECASE,
 )
-MARKDOWN_RE = re.compile(r"[`*_]+")
+MARKDOWN_CODE_RE = re.compile(r"`([^`]+)`")
+MARKDOWN_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+MARKDOWN_ITALIC_RE = re.compile(r"(?<![\w*])\*([^*]+)\*(?![\w*])")
+LEAD_SPLIT_RE = re.compile(r",\s+fixing\b|\s+[—–]\s+|;\s+", re.IGNORECASE)
+TRAILING_ISSUE_RE = re.compile(r"\s*\(?#\d+\)?\.?\s*$")
+ISSUE_ONLY_RE = re.compile(r"^\(?#\d+\)?\.?$")
 
 
 def generate_story(source_data: SourceInput) -> Story:
@@ -84,10 +89,10 @@ def _headline(source: SourceData, facts: list[str]) -> str:
         return _truncate(_strip_md(subject), HEADLINE_MAX_CHARS)
 
     first = facts[0] if facts else _strip_conventional_prefix(source.title)
-    first = _first_sentence(_strip_md(first))
+    lead = _lead_clause(_strip_md(first))
     if source.version:
-        return _truncate(f"{source.version}: {first}", HEADLINE_MAX_CHARS)
-    return _truncate(first, HEADLINE_MAX_CHARS)
+        return _truncate(f"{source.version}: {lead}", HEADLINE_MAX_CHARS)
+    return _truncate(lead, HEADLINE_MAX_CHARS)
 
 
 def _key_facts(source: SourceData) -> list[str]:
@@ -111,13 +116,19 @@ def _key_facts(source: SourceData) -> list[str]:
 
 
 def _proof_point(source: SourceData, facts: list[str]) -> str:
+    primary = facts[0] if facts else source.body
+    outcome = _outcome_clause(_strip_md(_collapse_ws(primary)))
+    if outcome:
+        return _truncate(outcome, PROOF_MAX_CHARS)
+
     haystacks = [*facts, source.body, source.title]
     for text in haystacks:
         for pattern in PROOF_PATTERNS:
             match = pattern.search(text)
             if match:
-                sentence = _sentence_containing(text, match.start()) or text
-                return _truncate(_strip_md(_collapse_ws(sentence)), PROOF_MAX_CHARS)
+                snippet = _proof_snippet(text, match)
+                if snippet and not ISSUE_ONLY_RE.match(snippet):
+                    return _truncate(snippet, PROOF_MAX_CHARS)
 
     if source.kind == CHANGELOG_KIND and source.version:
         n = len(facts)
@@ -172,7 +183,52 @@ def _strip_conventional_prefix(subject: str) -> str:
 
 
 def _strip_md(value: str) -> str:
-    return MARKDOWN_RE.sub("", value).strip()
+    """Drop markdown wrappers; keep identifiers like get_stats() and _originals."""
+    text = MARKDOWN_CODE_RE.sub(r"\1", value)
+    text = MARKDOWN_BOLD_RE.sub(r"\1", text)
+    text = MARKDOWN_ITALIC_RE.sub(r"\1", text)
+    return text.strip()
+
+
+def _lead_clause(value: str) -> str:
+    """Headline = what changed, not the whole bullet or a mid-word ellipsis."""
+    stripped = TRAILING_ISSUE_RE.sub("", value.strip()).rstrip(".")
+    match = LEAD_SPLIT_RE.search(stripped)
+    if match:
+        stripped = stripped[: match.start()]
+    return _collapse_ws(stripped)
+
+
+def _outcome_clause(value: str) -> Optional[str]:
+    """Prefer the consequence (after an em dash or ', fixing') as the proof point."""
+    text = _collapse_ws(value)
+    for sep in (" — ", " – "):
+        if sep in text:
+            return _with_issue_citation(text, text.split(sep, 1)[1])
+    match = re.search(r",\s+fixing\s+", text, re.IGNORECASE)
+    if match:
+        return _with_issue_citation(text, "fixing " + text[match.end() :])
+    return None
+
+
+def _with_issue_citation(full: str, clause: str) -> str:
+    body = TRAILING_ISSUE_RE.sub("", _collapse_ws(clause)).rstrip(".")
+    issue = re.search(r"#(\d+)", full)
+    if issue:
+        return f"{body} (#{issue.group(1)})."
+    return f"{body}."
+
+
+def _proof_snippet(text: str, match: Match[str]) -> str:
+    sentence = _sentence_containing(text, match.start()) or text
+    cleaned = _strip_md(_collapse_ws(sentence))
+    if not ISSUE_ONLY_RE.match(cleaned):
+        return cleaned
+    prior = text[: match.start()].rstrip().rstrip("(").rstrip()
+    if not prior:
+        return cleaned
+    prev = _sentence_containing(prior, max(0, len(prior) - 1)) or prior
+    return _with_issue_citation(text, prev)
 
 
 def _first_sentence(value: str, max_chars: int = HEADLINE_MAX_CHARS) -> str:
