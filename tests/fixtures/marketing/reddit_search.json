@@ -1,0 +1,17 @@
+{
+  "data": {
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "abc123",
+          "permalink": "/r/LocalLLaMA/comments/abc123/lost_context_mid_run/",
+          "title": "Agent lost context mid-run",
+          "selftext": "Every time the context got compressed my coding agent forgets the spec I wrote at the start.",
+          "author": "bob",
+          "created_utc": 1750000000
+        }
+      }
+    ]
+  }
+}

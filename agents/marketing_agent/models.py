@@ -37,6 +37,31 @@ class PendingApprovalEntry:
 
 
 @dataclass(frozen=True)
+class PublicPost:
+    """One public HN / Reddit / Twitter post or comment."""
+
+    platform: str
+    post_id: str
+    url: str
+    author: str
+    title: str
+    body: str
+    created_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ScoredLead:
+    """A public post scored against StreamCtx features."""
+
+    post: PublicPost
+    score: float
+    matched_features: tuple[str, ...]
+    matched_terms: tuple[str, ...]
+    reason: str
+    primary_feature: str = ""
+
+
+@dataclass(frozen=True)
 class SourceData:
     """
     One changelog entry (version section) or one git commit.

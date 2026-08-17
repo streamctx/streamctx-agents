@@ -74,6 +74,8 @@ class DraftAdapter(ABC):
             platform=self.platform,
             store=self.store,
             fingerprint=fingerprint,
+            content_type=self.content_type,
+            target=target,
         )
         entry = self.store.create_entry(
             platform=self.platform,

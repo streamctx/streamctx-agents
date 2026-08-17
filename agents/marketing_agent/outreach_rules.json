@@ -1,0 +1,62 @@
+{
+  "min_score": 0.3,
+  "sources": ["hn", "reddit", "twitter"],
+  "search_limit": 8,
+  "features": {
+    "compression": {
+      "label": "context compression",
+      "search_queries": ["context loss", "lost context window"],
+      "keywords": [
+        "context loss",
+        "lost context",
+        "context window",
+        "forgot earlier",
+        "truncated context",
+        "context got compressed",
+        "dropped the earlier messages"
+      ]
+    },
+    "checkpoint_resume": {
+      "label": "checkpoint/resume",
+      "search_queries": ["can't resume agent", "lost session checkpoint"],
+      "keywords": [
+        "checkpoint",
+        "can't resume",
+        "cannot resume",
+        "lost session",
+        "start over after crash",
+        "agent dies",
+        "resume the agent",
+        "no way to resume"
+      ]
+    },
+    "observability": {
+      "label": "call-level observability",
+      "search_queries": ["no llm observability", "can't see agent traces"],
+      "keywords": [
+        "no observability",
+        "no tracing",
+        "can't see llm",
+        "cannot see llm",
+        "black box agent",
+        "no idea which call",
+        "token usage invisible",
+        "untraced llm"
+      ]
+    },
+    "attribution_replay": {
+      "label": "attribution + counterfactual replay",
+      "search_queries": ["agent failure root cause", "which prompt caused failure"],
+      "keywords": [
+        "agent failure",
+        "agent failed",
+        "which call broke",
+        "root cause",
+        "context drift",
+        "recency bias",
+        "replay the session",
+        "which prompt caused"
+      ]
+    }
+  }
+}

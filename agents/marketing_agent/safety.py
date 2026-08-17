@@ -144,9 +144,16 @@ class SafetyGate:
         platform: str,
         store: PendingApprovalStore,
         fingerprint: Optional[str] = None,
+        content_type: Optional[str] = None,
+        target: Optional[str] = None,
     ) -> str:
         text = content
         promo = self.rules.self_promo
+        # Personalized DMs are always human-reviewed; do not run the public-post
+        # self-promo filter or the cross-platform story stagger on them.
+        if content_type == "dm":
+            _assert_dm_target_free(store, target)
+            return text
         if platform in promo.platforms:
             text, score, reasons = review_self_promo(text, promo)
             if score >= promo.threshold:
@@ -276,3 +283,15 @@ def _similar(left: str, right: str, rules: DuplicateRules) -> bool:
     if min(len(left), len(right)) < rules.min_normalized_chars:
         return False
     return SequenceMatcher(None, left, right).ratio() >= rules.similarity_threshold
+
+
+def _assert_dm_target_free(store: PendingApprovalStore, target: Optional[str]) -> None:
+    if not target or not str(target).strip():
+        raise DuplicateContentError("Outreach DM requires a target post URL or handle.")
+    needle = str(target).strip()
+    for status in ("pending", "approved", "published"):
+        for entry in store.list_by_status(status):
+            if entry.content_type == "dm" and (entry.target or "").strip() == needle:
+                raise DuplicateContentError(
+                    f"Outreach DM already queued for {needle} (entry_id={entry.entry_id})."
+                )

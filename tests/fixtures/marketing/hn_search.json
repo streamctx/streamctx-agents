@@ -1,0 +1,12 @@
+{
+  "hits": [
+    {
+      "objectID": "42424242",
+      "title": "Agent forgot earlier tool results",
+      "comment_text": "The context window dropped the earlier messages after the third tool call and I had to paste the spec back in.",
+      "author": "alice",
+      "created_at": "2026-08-10T12:00:00.000Z",
+      "story_title": "Agent forgot earlier tool results"
+    }
+  ]
+}

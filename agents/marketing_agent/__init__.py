@@ -1,4 +1,11 @@
-from agents.marketing_agent.models import PendingApprovalEntry, SourceData, Story
+from agents.marketing_agent.models import (
+    PendingApprovalEntry,
+    PublicPost,
+    ScoredLead,
+    SourceData,
+    Story,
+)
+from agents.marketing_agent.outreach import Outreach, OutreachRules, generate_outreach_draft, score_lead
 from agents.marketing_agent.pending_approval import PendingApprovalStore
 from agents.marketing_agent.safety import (
     DuplicateContentError,
@@ -22,19 +29,25 @@ __all__ = [
     "HackerNewsAdapter",
     "IndieHackersAdapter",
     "LinkedInAdapter",
+    "Outreach",
+    "OutreachRules",
     "PendingApprovalEntry",
     "PendingApprovalStore",
     "ProductHuntAdapter",
+    "PublicPost",
     "RedditAdapter",
     "SafetyGate",
+    "ScoredLead",
     "SelfPromoError",
     "DuplicateContentError",
     "SourceData",
     "Story",
     "TwitterAdapter",
     "collect_sources",
+    "generate_outreach_draft",
     "generate_story",
     "generate_stories",
     "load_significant_commits",
     "parse_changelog",
+    "score_lead",
 ]
