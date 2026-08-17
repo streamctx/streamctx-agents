@@ -21,6 +21,9 @@ STATUS_AUTO_FIX_FAILED = "auto_fix_failed"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
 
+ROOT_CAUSE_INTAKE = "INTAKE"
+INTAKE_KIND = "intake"
+
 NotifierFn = Callable[[PendingApprovalEntry], None]
 
 
@@ -79,6 +82,59 @@ class PendingApprovalStore:
             self._conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
             )
+
+    def create_intake_task(
+        self,
+        *,
+        task_ref: str,
+        summary: str,
+        request: str,
+        payload: Optional[dict[str, Any]] = None,
+        confidence: float = 0.0,
+        root_cause: str = ROOT_CAUSE_INTAKE,
+    ) -> PendingApprovalEntry:
+        """Queue a human-gated task. No diff is stored, so nothing auto-commits.
+
+        Reuses an existing row with the same ``task_ref`` (stored as
+        ``session_id``) so retries do not duplicate intake.
+        """
+        ref = _require_text("task_ref", task_ref)
+        existing = self.get_latest_by_session_id(ref)
+        if existing is not None:
+            return existing
+        body: dict[str, Any] = {
+            "kind": INTAKE_KIND,
+            "summary": _require_text("summary", summary),
+            "request": _require_text("request", request),
+        }
+        if payload:
+            for key, value in payload.items():
+                if key not in body:
+                    body[key] = value
+        return self.create_entry(
+            session_id=ref,
+            root_cause=root_cause or ROOT_CAUSE_INTAKE,
+            confidence=float(confidence),
+            matched_pattern_id=None,
+            diff=None,
+            regression_test=None,
+            test_results=body,
+            retries_used=0,
+            status=STATUS_NEEDS_HUMAN_REVIEW,
+        )
+
+    def get_latest_by_session_id(self, session_id: str) -> Optional[PendingApprovalEntry]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM pending_approval
+                WHERE session_id = ?
+                ORDER BY created_at DESC, entry_id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        return _row_to_entry(dict(row)) if row else None
 
     def create_needs_human_review(self, diagnosis: DiagnosisResult) -> PendingApprovalEntry:
         """Record a low-confidence or unclear diagnosis for manual review."""
@@ -211,6 +267,13 @@ class PendingApprovalStore:
         from agents.coding_agent.notifications import notify_pending_approval
 
         notify_pending_approval(entry)
+
+
+def _require_text(name: str, value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        raise ValueError(f"{name} is empty")
+    return text
 
 
 def _serialize_test_results(value: Optional[str | dict[str, Any]]) -> Optional[str]:

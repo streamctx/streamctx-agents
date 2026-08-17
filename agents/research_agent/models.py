@@ -138,6 +138,14 @@ class ClassifyResult:
 
 
 @dataclass(frozen=True)
+class HandoffResult:
+    """Outcome of one Stage 6 coding-agent handoff. Independently inspectable."""
+
+    handed_off: tuple[ResearchIdea, ...]
+    errors: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class SourceItem:
     """A raw paper or repo from a poll, before persistence."""
 

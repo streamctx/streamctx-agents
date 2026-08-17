@@ -77,6 +77,8 @@ class ResearchConfig:
         "AgentLedger",
         "LiteAgent",
     )
+    handoff_min_composite: float = 4.0
+    handoff_min_feasibility: int = 4
 
     def interval_for(self, source_type: str) -> int:
         if source_type == "arxiv":

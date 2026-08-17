@@ -1,5 +1,5 @@
 """
-Research Agent CLI — poll, hype-filter, gap-map, digest, then classify.
+Research Agent CLI — poll, hype-filter, gap-map, digest, classify, handoff.
 
 Usage::
 
@@ -14,6 +14,8 @@ Usage::
     python -m agents.research_agent.research_agent digest --no-notify
     python -m agents.research_agent.research_agent classify
     python -m agents.research_agent.research_agent classify --limit 10
+    python -m agents.research_agent.research_agent handoff
+    python -m agents.research_agent.research_agent handoff --limit 5 --no-notify
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ from agents.research_agent.digest import run_digest
 from agents.research_agent.digest import summarize as summarize_digest
 from agents.research_agent.gap import run_gap_map
 from agents.research_agent.gap import summarize as summarize_gap
+from agents.research_agent.handoff import run_handoff
+from agents.research_agent.handoff import summarize as summarize_handoff
 from agents.research_agent.hype import run_hype_filter
 from agents.research_agent.hype import summarize as summarize_hype
 from agents.research_agent.poll import run_poll, summarize
@@ -151,6 +155,32 @@ def cmd_classify(args: argparse.Namespace) -> int:
         tracker.stop()
 
 
+def cmd_handoff(args: argparse.Namespace) -> int:
+    tracker = get_tracker(AGENT_IDS["research"])
+    tracker.start()
+    try:
+        tracker.checkpoint()
+        store = ResearchStore(db_path=args.db)
+        try:
+            result = run_handoff(
+                store,
+                coding_db=args.coding_db,
+                notify=not args.no_notify,
+                limit=args.limit,
+            )
+        finally:
+            store.close()
+        tracker.checkpoint()
+        print(f"[research-agent] handoff {summarize_handoff(result)}")
+        for idea in result.handed_off:
+            print(f"  prototyped {idea.title} ({idea.idea_id})")
+        for idea_id, error in result.errors:
+            print(f"  ! {idea_id}: {error}", file=sys.stderr)
+        return 1 if result.errors else 0
+    finally:
+        tracker.stop()
+
+
 def _add_db_limit(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db",
@@ -218,6 +248,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_db_limit(classify_parser)
     classify_parser.set_defaults(func=cmd_classify)
+
+    handoff_parser = sub.add_parser(
+        "handoff",
+        help="Queue high-feasibility features as coding_agent prototype intake",
+    )
+    _add_db_limit(handoff_parser)
+    handoff_parser.add_argument(
+        "--coding-db",
+        default=None,
+        help="coding_agent SQLite path (default: ~/.streamctx/coding_agent.db)",
+    )
+    handoff_parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Skip the coding-agent webhook (still create intake + mark prototyped)",
+    )
+    handoff_parser.set_defaults(func=cmd_handoff)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

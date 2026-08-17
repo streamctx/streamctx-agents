@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from agents.research_agent.models import (
+    CLASSIFICATION_FEATURE,
     CLASSIFICATIONS,
     HYPE_LABELS,
     HYPE_MARKETING,
@@ -23,6 +24,7 @@ from agents.research_agent.models import (
     STATUSES,
     STATUS_DISMISSED,
     STATUS_NEW,
+    STATUS_PROTOTYPED,
     HypeDiscard,
     HypeStats,
     ResearchIdea,
@@ -494,6 +496,36 @@ class ResearchStore:
         if updated is None:
             raise KeyError(idea_id)
         return updated
+
+    def list_handoff_candidates(
+        self,
+        *,
+        min_composite: float,
+        min_feasibility: int,
+        limit: Optional[int] = None,
+    ) -> list[ResearchIdea]:
+        """High-feasibility StreamCtx features not yet handed to coding_agent."""
+        sql = (
+            "SELECT * FROM research_ideas "
+            "WHERE classification = ? "
+            "AND feasibility_score >= ? "
+            "AND composite_score >= ? "
+            "AND status NOT IN (?, ?) "
+            "ORDER BY composite_score DESC, detected_at ASC, idea_id ASC"
+        )
+        params: list[object] = [
+            CLASSIFICATION_FEATURE,
+            int(min_feasibility),
+            float(min_composite),
+            STATUS_PROTOTYPED,
+            STATUS_DISMISSED,
+        ]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_idea(row) for row in rows]
 
 
 def _utc_now() -> str:

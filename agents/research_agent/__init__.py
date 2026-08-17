@@ -1,11 +1,13 @@
 from agents.research_agent.classify import run_classify
 from agents.research_agent.digest import run_digest
 from agents.research_agent.gap import run_gap_map
+from agents.research_agent.handoff import run_handoff
 from agents.research_agent.hype import run_hype_filter
 from agents.research_agent.models import (
     ClassifyResult,
     DigestResult,
     GapMapResult,
+    HandoffResult,
     HypeFilterResult,
     PollResult,
     ResearchIdea,
@@ -19,6 +21,7 @@ __all__ = [
     "ClassifyResult",
     "DigestResult",
     "GapMapResult",
+    "HandoffResult",
     "HypeFilterResult",
     "PollResult",
     "ResearchConfig",
@@ -30,6 +33,7 @@ __all__ = [
     "run_classify",
     "run_digest",
     "run_gap_map",
+    "run_handoff",
     "run_hype_filter",
     "run_poll",
 ]
