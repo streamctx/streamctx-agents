@@ -25,6 +25,7 @@ from agents.competitor_agent.http import (
     fetch_text,
     github_headers,
 )
+from agents.competitor_agent.mentions import poll_all_mentions
 from agents.competitor_agent.models import (
     SIGNAL_TYPE_NEW_POST,
     SIGNAL_TYPE_NEW_RELEASE,
@@ -347,8 +348,11 @@ def run_snapshot_poll(
     sleep_fn: Optional[SleepFn] = None,
     now_fn: Optional[NowFn] = None,
     token: Optional[str] = None,
+    http=None,
+    twitter_bearer: Optional[str] = None,
+    ph_token: Optional[str] = None,
 ) -> SnapshotPollResult:
-    """Walk the config list: pricing, GitHub, then RSS, with inter-call delay."""
+    """Walk the config list: pricing, GitHub, RSS, then mentions."""
     spec = config or CompetitorConfig.load()
     sleeper = sleep_fn or time.sleep
     signals: list[CompetitorSignal] = []
@@ -432,6 +436,23 @@ def run_snapshot_poll(
             )
         except Exception as exc:
             errors.append((f"{item.name}:changelog", str(exc)))
+
+    if spec.mentions_enabled:
+        try:
+            mention_signals, mention_skipped, mention_errors = poll_all_mentions(
+                store,
+                config=spec,
+                http=http,
+                twitter_bearer=twitter_bearer,
+                ph_token=ph_token,
+                sleep_fn=sleep_fn,
+                now_fn=now_fn,
+            )
+            signals.extend(mention_signals)
+            skipped.extend(mention_skipped)
+            errors.extend(mention_errors)
+        except Exception as exc:
+            errors.append(("mentions", str(exc)))
 
     return SnapshotPollResult(
         signals=tuple(signals),
@@ -555,7 +576,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Poll competitor pricing pages, GitHub releases, and RSS feeds."
+        description="Poll competitor pricing, GitHub, RSS, and mention sources."
     )
     parser.add_argument("--config", help="Path to competitors.json")
     parser.add_argument(

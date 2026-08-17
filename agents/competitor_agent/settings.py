@@ -19,7 +19,11 @@ class CompetitorSource:
     pricing_url: Optional[str] = None
     github_repo: Optional[str] = None
     rss_url: Optional[str] = None
+    search_names: tuple[str, ...] = ()
     notes: str = ""
+
+    def query_names(self) -> tuple[str, ...]:
+        return self.search_names or (self.name,)
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,14 @@ class CompetitorConfig:
     pricing_min_interval_seconds: int = 21600
     github_min_interval_seconds: int = 3600
     rss_min_interval_seconds: int = 10800
+    mention_min_interval_seconds: int = 21600
+    mention_lookback_days: int = 7
+    mention_search_limit: int = 8
+    hn_min_points: int = 40
+    hn_min_comments: int = 20
+    twitter_min_likes: int = 30
+    producthunt_min_votes: int = 40
+    mentions_enabled: bool = True
     github_per_page: int = 30
     max_retries: int = 3
     backoff_base_seconds: float = 1.0
@@ -64,6 +76,11 @@ class CompetitorConfig:
                 pricing_url=_optional_text(row.get("pricing_url")),
                 github_repo=_optional_text(row.get("github_repo")),
                 rss_url=_optional_text(row.get("rss_url")),
+                search_names=tuple(
+                    str(alias).strip()
+                    for alias in (row.get("search_names") or [])
+                    if str(alias).strip()
+                ),
                 notes=str(row.get("notes") or ""),
             )
             for row in (data.get("competitors") or [])
@@ -80,6 +97,14 @@ class CompetitorConfig:
             pricing_min_interval_seconds=int(data.get("pricing_min_interval_seconds", 21600)),
             github_min_interval_seconds=int(data.get("github_min_interval_seconds", 3600)),
             rss_min_interval_seconds=int(data.get("rss_min_interval_seconds", 10800)),
+            mention_min_interval_seconds=int(data.get("mention_min_interval_seconds", 21600)),
+            mention_lookback_days=int(data.get("mention_lookback_days", 7)),
+            mention_search_limit=int(data.get("mention_search_limit", 8)),
+            hn_min_points=int(data.get("hn_min_points", 40)),
+            hn_min_comments=int(data.get("hn_min_comments", 20)),
+            twitter_min_likes=int(data.get("twitter_min_likes", 30)),
+            producthunt_min_votes=int(data.get("producthunt_min_votes", 40)),
+            mentions_enabled=_as_bool(data.get("mentions_enabled", True)),
             github_per_page=int(data.get("github_per_page", 30)),
             max_retries=int(data.get("max_retries", 3)),
             backoff_base_seconds=float(data.get("backoff_base_seconds", 1.0)),
@@ -102,8 +127,23 @@ def github_token() -> str:
     return ""
 
 
+def producthunt_token() -> str:
+    for name in ("PRODUCTHUNT_TOKEN", "PH_TOKEN"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
 def _optional_text(value: object) -> Optional[str]:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on"}

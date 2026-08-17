@@ -191,39 +191,30 @@ class Outreach:
     def _search_hn(self, queries: list[str]) -> list[PublicPost]:
         posts: list[PublicPost] = []
         for query in queries:
-            url = f"{HN_SEARCH_URL}?{urlencode({'query': query, 'hitsPerPage': self.rules.search_limit})}"
-            payload = self.http.get_json(url)
-            for hit in payload.get("hits") or []:
-                post = _post_from_hn(hit)
-                if post:
-                    posts.append(post)
+            posts.extend(
+                search_hn(self.http, query, limit=self.rules.search_limit)
+            )
         return posts
 
     def _search_reddit(self, queries: list[str]) -> list[PublicPost]:
         posts: list[PublicPost] = []
         for query in queries:
-            url = f"{REDDIT_SEARCH_URL}?{urlencode({'q': query, 'sort': 'new', 'limit': self.rules.search_limit})}"
-            payload = self.http.get_json(url)
-            children = ((payload.get("data") or {}).get("children")) or []
-            for child in children:
-                post = _post_from_reddit(child.get("data") or {})
-                if post:
-                    posts.append(post)
+            posts.extend(
+                search_reddit(self.http, query, limit=self.rules.search_limit)
+            )
         return posts
 
     def _search_twitter(self, queries: list[str]) -> list[PublicPost]:
-        if not self.twitter_bearer:
-            return []
         posts: list[PublicPost] = []
-        headers = {"Authorization": f"Bearer {self.twitter_bearer}"}
         for query in queries:
-            q = f"({query}) -is:retweet lang:en"
-            url = f"{TWITTER_SEARCH_URL}?{urlencode({'query': q, 'max_results': max(10, self.rules.search_limit)})}"
-            payload = self.http.get_json(url, headers=headers)
-            for item in payload.get("data") or []:
-                post = _post_from_twitter(item)
-                if post:
-                    posts.append(post)
+            posts.extend(
+                search_twitter(
+                    self.http,
+                    query,
+                    bearer=self.twitter_bearer,
+                    limit=self.rules.search_limit,
+                )
+            )
         return posts
 
 
@@ -329,6 +320,74 @@ def _has_term(text: str, keyword: str) -> bool:
     return re.search(rf"\b{re.escape(needle)}\b", hay) is not None
 
 
+def search_hn(
+    http: JsonHttpClient,
+    query: str,
+    *,
+    limit: int = 8,
+    since_unix: Optional[int] = None,
+) -> list[PublicPost]:
+    """Algolia HN search. Optional ``since_unix`` maps to ``created_at_i``."""
+    params: dict[str, Any] = {"query": query, "hitsPerPage": int(limit)}
+    if since_unix is not None:
+        params["numericFilters"] = f"created_at_i>{int(since_unix)}"
+    payload = http.get_json(f"{HN_SEARCH_URL}?{urlencode(params)}")
+    posts: list[PublicPost] = []
+    for hit in payload.get("hits") or []:
+        post = post_from_hn(hit)
+        if post:
+            posts.append(post)
+    return posts
+
+
+def search_reddit(
+    http: JsonHttpClient,
+    query: str,
+    *,
+    limit: int = 8,
+) -> list[PublicPost]:
+    """Public Reddit JSON search (same endpoint Outreach uses)."""
+    params = {"q": query, "sort": "new", "limit": int(limit)}
+    payload = http.get_json(f"{REDDIT_SEARCH_URL}?{urlencode(params)}")
+    children = ((payload.get("data") or {}).get("children")) or []
+    posts: list[PublicPost] = []
+    for child in children:
+        post = post_from_reddit(child.get("data") or {})
+        if post:
+            posts.append(post)
+    return posts
+
+
+def search_twitter(
+    http: JsonHttpClient,
+    query: str,
+    *,
+    bearer: str,
+    limit: int = 10,
+    start_time: Optional[str] = None,
+) -> list[PublicPost]:
+    """Twitter recent search. No-ops without a bearer, matching Outreach."""
+    if not bearer:
+        return []
+    params: dict[str, Any] = {
+        "query": f"({query}) -is:retweet lang:en",
+        "max_results": max(10, int(limit)),
+        "tweet.fields": "created_at,public_metrics",
+    }
+    if start_time:
+        params["start_time"] = start_time
+    payload = http.get_json(
+        f"{TWITTER_SEARCH_URL}?{urlencode(params)}",
+        headers={"Authorization": f"Bearer {bearer}"},
+    )
+    posts: list[PublicPost] = []
+    for item in payload.get("data") or []:
+        post = post_from_twitter(item)
+        if post:
+            posts.append(post)
+    return posts
+
+
 def _search_queries(rules: OutreachRules) -> list[str]:
     queries: list[str] = []
     for feature in rules.features:
@@ -337,7 +396,7 @@ def _search_queries(rules: OutreachRules) -> list[str]:
     return queries or ["llm agent context loss"]
 
 
-def _post_from_hn(hit: dict[str, Any]) -> Optional[PublicPost]:
+def post_from_hn(hit: dict[str, Any]) -> Optional[PublicPost]:
     post_id = str(hit.get("objectID") or "").strip()
     if not post_id:
         return None
@@ -353,10 +412,12 @@ def _post_from_hn(hit: dict[str, Any]) -> Optional[PublicPost]:
         title=title or "(hn comment)",
         body=body,
         created_at=str(hit.get("created_at") or "") or None,
+        points=_optional_int(hit.get("points")),
+        comment_count=_optional_int(hit.get("num_comments")),
     )
 
 
-def _post_from_reddit(data: dict[str, Any]) -> Optional[PublicPost]:
+def post_from_reddit(data: dict[str, Any]) -> Optional[PublicPost]:
     post_id = str(data.get("id") or "").strip()
     permalink = str(data.get("permalink") or "").strip()
     if not post_id:
@@ -374,14 +435,17 @@ def _post_from_reddit(data: dict[str, Any]) -> Optional[PublicPost]:
         title=title or "(reddit post)",
         body=body,
         created_at=str(data.get("created_utc") or "") or None,
+        points=_optional_int(data.get("score")),
+        comment_count=_optional_int(data.get("num_comments")),
     )
 
 
-def _post_from_twitter(item: dict[str, Any]) -> Optional[PublicPost]:
+def post_from_twitter(item: dict[str, Any]) -> Optional[PublicPost]:
     post_id = str(item.get("id") or "").strip()
     text = str(item.get("text") or "").strip()
     if not post_id or not text:
         return None
+    metrics = item.get("public_metrics") or {}
     return PublicPost(
         platform="twitter",
         post_id=post_id,
@@ -389,7 +453,24 @@ def _post_from_twitter(item: dict[str, Any]) -> Optional[PublicPost]:
         author=str(item.get("author_id") or ""),
         title=text.split("\n", 1)[0][:80],
         body=text,
+        created_at=str(item.get("created_at") or "") or None,
+        like_count=_optional_int(metrics.get("like_count")),
+        comment_count=_optional_int(metrics.get("reply_count")),
     )
+
+
+_post_from_hn = post_from_hn
+_post_from_reddit = post_from_reddit
+_post_from_twitter = post_from_twitter
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _strip_html(value: str) -> str:

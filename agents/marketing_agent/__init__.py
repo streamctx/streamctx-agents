@@ -5,7 +5,15 @@ from agents.marketing_agent.models import (
     SourceData,
     Story,
 )
-from agents.marketing_agent.outreach import Outreach, OutreachRules, generate_outreach_draft, score_lead
+from agents.marketing_agent.outreach import (
+    Outreach,
+    OutreachRules,
+    generate_outreach_draft,
+    score_lead,
+    search_hn,
+    search_reddit,
+    search_twitter,
+)
 from agents.marketing_agent.pending_approval import PendingApprovalStore
 from agents.marketing_agent.safety import (
     DuplicateContentError,
@@ -52,4 +60,7 @@ __all__ = [
     "load_significant_commits",
     "parse_changelog",
     "score_lead",
+    "search_hn",
+    "search_reddit",
+    "search_twitter",
 ]

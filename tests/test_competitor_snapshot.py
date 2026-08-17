@@ -52,6 +52,7 @@ def config(tmp_path) -> CompetitorConfig:
                 "github_min_interval_seconds": 0,
                 "max_retries": 3,
                 "backoff_base_seconds": 1.0,
+                "mentions_enabled": False,
                 "competitors": [
                     {
                         "name": "LangSmith",

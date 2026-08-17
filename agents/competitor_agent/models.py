@@ -9,11 +9,13 @@ from typing import Optional
 SNAPSHOT_TYPE_PRICING = "pricing"
 SNAPSHOT_TYPE_CHANGELOG = "changelog"
 SNAPSHOT_TYPE_GITHUB_RELEASE = "github_release"
+SNAPSHOT_TYPE_MENTIONS = "mentions"
 SNAPSHOT_TYPES = frozenset(
     {
         SNAPSHOT_TYPE_PRICING,
         SNAPSHOT_TYPE_CHANGELOG,
         SNAPSHOT_TYPE_GITHUB_RELEASE,
+        SNAPSHOT_TYPE_MENTIONS,
     }
 )
 

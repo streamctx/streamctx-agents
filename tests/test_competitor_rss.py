@@ -103,6 +103,7 @@ def config(tmp_path) -> CompetitorConfig:
                 "pricing_min_interval_seconds": 0,
                 "github_min_interval_seconds": 0,
                 "rss_min_interval_seconds": 0,
+                "mentions_enabled": False,
                 "competitors": [
                     {
                         "name": "LangSmith",
@@ -191,6 +192,7 @@ def test_poll_rss_skips_when_inside_min_interval(store, tmp_path):
         json.dumps(
             {
                 "rss_min_interval_seconds": 10800,
+                "mentions_enabled": False,
                 "competitors": [
                     {"name": "LangSmith", "rss_url": "https://example.test/rss.xml"}
                 ],

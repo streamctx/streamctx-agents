@@ -4,6 +4,7 @@ from agents.competitor_agent.models import (
     WeeklyReport,
 )
 from agents.competitor_agent.settings import CompetitorConfig, CompetitorSource
+from agents.competitor_agent.mentions import poll_all_mentions, poll_mentions
 from agents.competitor_agent.snapshot import (
     poll_github_releases,
     poll_pricing,
@@ -20,7 +21,9 @@ __all__ = [
     "CompetitorSource",
     "CompetitorStore",
     "WeeklyReport",
+    "poll_all_mentions",
     "poll_github_releases",
+    "poll_mentions",
     "poll_pricing",
     "poll_rss",
     "run_snapshot_poll",

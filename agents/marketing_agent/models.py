@@ -47,6 +47,9 @@ class PublicPost:
     title: str
     body: str
     created_at: Optional[str] = None
+    points: Optional[int] = None
+    comment_count: Optional[int] = None
+    like_count: Optional[int] = None
 
 
 @dataclass(frozen=True)
