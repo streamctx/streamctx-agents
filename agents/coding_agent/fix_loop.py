@@ -132,7 +132,7 @@ class FixValidationLoop:
             ),
             diff=proposal.diff,
             regression_test=proposal.regression_test,
-            test_results=_test_results_json(test_result),
+            test_results=_test_results_json(test_result, diagnosis),
             retries_used=retries_used,
             status=STATUS_READY_FOR_APPROVAL,
         )
@@ -164,17 +164,23 @@ class FixValidationLoop:
                     test_result.coverage_delta if test_result else 0.0
                 ),
                 "attempted_diffs": attempted_diffs,
+                "signature_hash": diagnosis.signature_hash,
+                "error_type": diagnosis.error_type,
+                "relevant_file": diagnosis.relevant_file,
             },
             retries_used=retries_used,
             status=STATUS_AUTO_FIX_FAILED,
         )
 
 
-def _test_results_json(test_result: TestResult) -> dict[str, Any]:
+def _test_results_json(test_result: TestResult, diagnosis: DiagnosisResult) -> dict[str, Any]:
     return {
         "passed": test_result.passed,
         "output": test_result.output,
         "coverage_delta": test_result.coverage_delta,
+        "signature_hash": diagnosis.signature_hash,
+        "error_type": diagnosis.error_type,
+        "relevant_file": diagnosis.relevant_file,
     }
 
 

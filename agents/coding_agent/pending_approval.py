@@ -18,6 +18,8 @@ DEFAULT_AGENT_DB = Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamc
 STATUS_NEEDS_HUMAN_REVIEW = "needs_human_review"
 STATUS_READY_FOR_APPROVAL = "ready_for_approval"
 STATUS_AUTO_FIX_FAILED = "auto_fix_failed"
+STATUS_APPROVED = "approved"
+STATUS_REJECTED = "rejected"
 
 
 class PendingApprovalStore:
@@ -151,6 +153,15 @@ class PendingApprovalStore:
             ).fetchall()
         return [_row_to_entry(dict(row)) for row in rows]
 
+    def update_status(self, entry_id: str, status: str) -> Optional[PendingApprovalEntry]:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pending_approval SET status = ? WHERE entry_id = ?",
+                (status, entry_id),
+            )
+            self._conn.commit()
+        return self.get_entry(entry_id)
+
 
 def _serialize_test_results(value: Optional[str | dict[str, Any]]) -> Optional[str]:
     if value is None:
@@ -167,6 +178,7 @@ def _diagnosis_context_json(diagnosis: DiagnosisResult) -> str:
             "reason": diagnosis.reason,
             "error_type": diagnosis.error_type,
             "relevant_file": diagnosis.relevant_file,
+            "signature_hash": diagnosis.signature_hash,
             "replay_verified": diagnosis.replay_verified,
             "signal_breakdown": diagnosis.signal_breakdown,
         },

@@ -72,6 +72,7 @@ def build_fix_request(
     attempt: int = 0,
     previous_failure_output: Optional[str] = None,
     regression_test_path: str = "tests/test_regression_auto.py",
+    rejection_hint: Optional[str] = None,
 ) -> FixRequest:
     pattern_template = None
     pattern_regression_test = None
@@ -87,6 +88,7 @@ def build_fix_request(
         attempt=attempt,
         previous_failure_output=previous_failure_output,
         regression_test_path=regression_test_path,
+        rejection_hint=rejection_hint,
     )
 
 
@@ -152,6 +154,12 @@ def _build_prompt(request: FixRequest) -> str:
         parts.append(
             "Previous pytest run failed after applying your last diff. "
             f"Failure output:\n{request.previous_failure_output}"
+        )
+
+    if request.rejection_hint:
+        parts.append(
+            "A prior fix for this bug signature was rejected by a human reviewer. "
+            f"Avoid repeating this approach:\n{request.rejection_hint}"
         )
 
     parts.append(

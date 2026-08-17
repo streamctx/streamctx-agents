@@ -24,6 +24,7 @@ class FixPatternMatch:
     fix_diff_template: str
     success_count: int
     reject_count: int
+    last_rejection_reason: Optional[str] = None
 
 
 @dataclass
@@ -81,6 +82,7 @@ class FixRequest:
     attempt: int = 0
     previous_failure_output: Optional[str] = None
     regression_test_path: str = "tests/test_regression_auto.py"
+    rejection_hint: Optional[str] = None
 
 
 @dataclass(frozen=True)
