@@ -62,3 +62,31 @@ class GateResult:
     diagnosis: DiagnosisResult
     pending_entry: Optional[PendingApprovalEntry]
     proceed_to_fix: bool
+
+
+@dataclass(frozen=True)
+class FixProposal:
+    diff: str
+    regression_test: str
+    regression_test_path: str
+
+
+@dataclass
+class FixRequest:
+    diagnosis: DiagnosisResult
+    error_message: str
+    source_contents: dict[str, str]
+    pattern_template: Optional[str] = None
+    pattern_regression_test: Optional[str] = None
+    attempt: int = 0
+    previous_failure_output: Optional[str] = None
+    regression_test_path: str = "tests/test_regression_auto.py"
+
+
+@dataclass(frozen=True)
+class FixLoopResult:
+    skipped: bool
+    diagnosis: DiagnosisResult
+    pending_entry: Optional[PendingApprovalEntry]
+    success: bool
+    attempts: int = 0
