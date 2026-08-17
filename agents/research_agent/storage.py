@@ -427,6 +427,42 @@ class ResearchStore:
             raise KeyError(idea_id)
         return updated
 
+    def list_digest_candidates(
+        self,
+        *,
+        since: str,
+        limit: int = 5,
+    ) -> list[ResearchIdea]:
+        """Top-scored ``new`` ideas in ``[since, now]``, highest composite first."""
+        sql = (
+            "SELECT * FROM research_ideas "
+            "WHERE status = ? AND composite_score IS NOT NULL AND detected_at >= ? "
+            "ORDER BY composite_score DESC, detected_at DESC, idea_id DESC "
+            "LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(
+                sql,
+                (STATUS_NEW, since, int(limit)),
+            ).fetchall()
+        return [_row_to_idea(row) for row in rows]
+
+    def set_status(self, idea_id: str, status: str) -> ResearchIdea:
+        _validate_enum("status", status, STATUSES)
+        idea = self.get_idea(idea_id)
+        if idea is None:
+            raise KeyError(idea_id)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE research_ideas SET status = ? WHERE idea_id = ?",
+                (status, idea_id),
+            )
+            self._conn.commit()
+        updated = self.get_idea(idea_id)
+        if updated is None:
+            raise KeyError(idea_id)
+        return updated
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()

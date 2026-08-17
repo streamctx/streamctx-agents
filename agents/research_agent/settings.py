@@ -70,6 +70,8 @@ class ResearchConfig:
         "Fractional Blame Attribution (Shapley-value style)",
         "Memory Provenance / Belief Lineage Tracking",
     )
+    digest_limit: int = 5
+    digest_lookback_hours: int = 24
 
     def interval_for(self, source_type: str) -> int:
         if source_type == "arxiv":

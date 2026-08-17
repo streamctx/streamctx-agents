@@ -1,5 +1,5 @@
 """
-Research Agent CLI — poll, hype-filter, then gap-map unlabeled substance.
+Research Agent CLI — poll, hype-filter, gap-map, then daily digest.
 
 Usage::
 
@@ -10,6 +10,8 @@ Usage::
     python -m agents.research_agent.research_agent hype-filter --limit 10
     python -m agents.research_agent.research_agent gap-map
     python -m agents.research_agent.research_agent gap-map --limit 10
+    python -m agents.research_agent.research_agent digest
+    python -m agents.research_agent.research_agent digest --no-notify
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import sys
 
 from streamctx import get_tracker
 
+from agents.research_agent.digest import run_digest
+from agents.research_agent.digest import summarize as summarize_digest
 from agents.research_agent.gap import run_gap_map
 from agents.research_agent.gap import summarize as summarize_gap
 from agents.research_agent.hype import run_hype_filter
@@ -104,6 +108,24 @@ def cmd_gap_map(args: argparse.Namespace) -> int:
         tracker.stop()
 
 
+def cmd_digest(args: argparse.Namespace) -> int:
+    tracker = get_tracker(AGENT_IDS["research"])
+    tracker.start()
+    try:
+        tracker.checkpoint()
+        store = ResearchStore(db_path=args.db)
+        try:
+            result = run_digest(store, notify=not args.no_notify)
+        finally:
+            store.close()
+        tracker.checkpoint()
+        print(f"[research-agent] digest {summarize_digest(result)}")
+        print(result.body)
+        return 0
+    finally:
+        tracker.stop()
+
+
 def _add_db_limit(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db",
@@ -148,6 +170,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_db_limit(gap_parser)
     gap_parser.set_defaults(func=cmd_gap_map)
+
+    digest_parser = sub.add_parser(
+        "digest",
+        help="Notify the top scored ideas from the last 24 hours",
+    )
+    digest_parser.add_argument(
+        "--db",
+        default=None,
+        help="SQLite path (default: ~/.streamctx/research_agent.db)",
+    )
+    digest_parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Skip the marketing webhook (still mark items reviewed)",
+    )
+    digest_parser.set_defaults(func=cmd_digest)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

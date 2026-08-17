@@ -202,3 +202,37 @@ def test_apply_gap_mapping_writes_scores_and_keeps_status_new(store):
             novelty_score=1,
             composite_score=1.0,
         )
+
+
+def test_list_digest_candidates_ranks_by_composite_and_set_status(store):
+    from agents.research_agent.models import HYPE_TECHNICAL, STATUS_REVIEWED
+
+    low = store.insert_idea(
+        source_url="https://arxiv.org/abs/low",
+        source_type=SOURCE_TYPE_ARXIV,
+        title="low",
+        hype_label=HYPE_TECHNICAL,
+        gap_description="minor",
+        feasibility_score=2,
+        pain_match_score=2,
+        novelty_score=2,
+        composite_score=2.0,
+        detected_at="2026-08-17T11:00:00+00:00",
+    )
+    high = store.insert_idea(
+        source_url="https://arxiv.org/abs/high",
+        source_type=SOURCE_TYPE_ARXIV,
+        title="high",
+        hype_label=HYPE_TECHNICAL,
+        gap_description="big gap",
+        feasibility_score=4,
+        pain_match_score=5,
+        novelty_score=5,
+        composite_score=4.8,
+        detected_at="2026-08-17T10:00:00+00:00",
+    )
+    ranked = store.list_digest_candidates(since="2026-08-16T12:00:00+00:00", limit=5)
+    assert [row.idea_id for row in ranked] == [high.idea_id, low.idea_id]
+    store.set_status(high.idea_id, STATUS_REVIEWED)
+    remaining = store.list_digest_candidates(since="2026-08-16T12:00:00+00:00", limit=5)
+    assert [row.idea_id for row in remaining] == [low.idea_id]

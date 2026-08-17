@@ -121,6 +121,15 @@ class GapMapResult:
 
 
 @dataclass(frozen=True)
+class DigestResult:
+    """Outcome of one Stage 4 daily digest. Independently inspectable in tests."""
+
+    items: tuple[ResearchIdea, ...]
+    body: str
+    notified: bool
+
+
+@dataclass(frozen=True)
 class SourceItem:
     """A raw paper or repo from a poll, before persistence."""
 
