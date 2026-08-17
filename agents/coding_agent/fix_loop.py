@@ -14,6 +14,7 @@ from agents.coding_agent.fix_generator import (
     read_source_files,
 )
 from agents.coding_agent.models import DiagnosisResult, FixLoopResult, GateResult
+from agents.coding_agent.pattern_memory import PatternMemory
 from agents.coding_agent.pending_approval import (
     STATUS_AUTO_FIX_FAILED,
     STATUS_READY_FOR_APPROVAL,
@@ -35,11 +36,13 @@ class FixValidationLoop:
         approval_store: Optional[PendingApprovalStore] = None,
         storage: Optional[SessionStorage] = None,
         source_root: Optional[Path | str] = None,
+        pattern_memory: Optional[PatternMemory] = None,
     ) -> None:
         self.fix_generator = fix_generator or FixGenerator()
         self.approval_store = approval_store or PendingApprovalStore()
         self.storage = storage or get_storage()
         self.source_root = Path(source_root or BASE_DIR)
+        self.pattern_memory = pattern_memory
 
     def run(self, gate_result: GateResult) -> FixLoopResult:
         if not gate_result.proceed_to_fix:
@@ -62,6 +65,11 @@ class FixValidationLoop:
 
         with Sandbox(source_root=self.source_root) as sandbox:
             for attempt in range(MAX_FIX_RETRIES + 1):
+                rejection_hint = None
+                if self.pattern_memory is not None:
+                    rejection_hint = self.pattern_memory.get_rejection_hint(
+                        diagnosis.signature_hash
+                    )
                 request = build_fix_request(
                     diagnosis,
                     error_message=error_message,
@@ -69,6 +77,7 @@ class FixValidationLoop:
                     attempt=attempt,
                     previous_failure_output=previous_failure_output,
                     regression_test_path=_regression_test_path(diagnosis),
+                    rejection_hint=rejection_hint,
                 )
                 proposal = self.fix_generator.generate(request)
                 last_proposal = proposal

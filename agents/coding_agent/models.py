@@ -93,3 +93,40 @@ class FixLoopResult:
     pending_entry: Optional[PendingApprovalEntry]
     success: bool
     attempts: int = 0
+
+
+@dataclass(frozen=True)
+class PipelineItemResult:
+    gate: GateResult
+    fix: FixLoopResult
+
+
+@dataclass(frozen=True)
+class PipelineRunResult:
+    items: list[PipelineItemResult]
+
+    @property
+    def failures_detected(self) -> int:
+        return len(self.items)
+
+    @property
+    def blocked_for_review(self) -> int:
+        return sum(1 for item in self.items if not item.gate.proceed_to_fix)
+
+    @property
+    def fixes_ready(self) -> int:
+        return sum(
+            1
+            for item in self.items
+            if item.fix.pending_entry is not None
+            and item.fix.pending_entry.status == "ready_for_approval"
+        )
+
+    @property
+    def fixes_failed(self) -> int:
+        return sum(
+            1
+            for item in self.items
+            if item.fix.pending_entry is not None
+            and item.fix.pending_entry.status == "auto_fix_failed"
+        )
