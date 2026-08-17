@@ -40,3 +40,25 @@ class DiagnosisResult:
     matched_pattern: Optional[FixPatternMatch] = None
     skip_to_stage4: bool = False
     signal_breakdown: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PendingApprovalEntry:
+    entry_id: str
+    session_id: str
+    root_cause: RootCauseType
+    confidence: float
+    matched_pattern_id: Optional[str]
+    diff: Optional[str]
+    regression_test: Optional[str]
+    test_results: Optional[str]
+    retries_used: int
+    status: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class GateResult:
+    diagnosis: DiagnosisResult
+    pending_entry: Optional[PendingApprovalEntry]
+    proceed_to_fix: bool
