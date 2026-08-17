@@ -52,6 +52,24 @@ class ResearchConfig:
     skip_github_repos: frozenset[str] = field(default_factory=frozenset)
     hype_delay_seconds: float = 0.25
     hype_excerpt_chars: int = 800
+    gap_delay_seconds: float = 0.25
+    gap_excerpt_chars: int = 800
+    pain_weight: float = 0.5
+    novelty_weight: float = 0.3
+    feasibility_weight: float = 0.2
+    streamctx_features: tuple[str, ...] = (
+        "checkpoint/resume",
+        "context compression",
+        "self-healing",
+        "poison detection",
+        "causal failure attribution",
+        "counterfactual replay",
+    )
+    known_unsolved: tuple[str, ...] = (
+        "Silent Success Detector (Struggle Score)",
+        "Fractional Blame Attribution (Shapley-value style)",
+        "Memory Provenance / Belief Lineage Tracking",
+    )
 
     def interval_for(self, source_type: str) -> int:
         if source_type == "arxiv":

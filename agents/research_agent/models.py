@@ -101,6 +101,26 @@ class HypeFilterResult:
 
 
 @dataclass(frozen=True)
+class GapMapping:
+    """Parsed Stage 3 LLM result plus computed composite."""
+
+    already_covered: bool
+    gap_description: str
+    feasibility_score: int
+    pain_match_score: int
+    novelty_score: int
+    composite_score: float
+
+
+@dataclass(frozen=True)
+class GapMapResult:
+    """Outcome of one Stage 3 pass. Independently inspectable in tests."""
+
+    mapped: tuple[ResearchIdea, ...]
+    errors: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class SourceItem:
     """A raw paper or repo from a poll, before persistence."""
 

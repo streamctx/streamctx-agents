@@ -18,6 +18,7 @@ from agents.research_agent.models import (
     CLASSIFICATIONS,
     HYPE_LABELS,
     HYPE_MARKETING,
+    HYPE_TECHNICAL,
     SOURCE_TYPES,
     STATUSES,
     STATUS_DISMISSED,
@@ -372,6 +373,60 @@ class ResearchStore:
             (key, int(delta)),
         )
 
+    def list_unscored(self, *, limit: Optional[int] = None) -> list[ResearchIdea]:
+        """Oldest hype-passed ideas that still need Stage 3 gap-mapping."""
+        sql = (
+            "SELECT * FROM research_ideas "
+            "WHERE hype_label = ? AND composite_score IS NULL AND status = ? "
+            "ORDER BY detected_at ASC, idea_id ASC"
+        )
+        params: list[object] = [HYPE_TECHNICAL, STATUS_NEW]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_idea(row) for row in rows]
+
+    def apply_gap_mapping(
+        self,
+        idea_id: str,
+        *,
+        gap_description: str,
+        feasibility_score: int,
+        pain_match_score: int,
+        novelty_score: int,
+        composite_score: float,
+    ) -> ResearchIdea:
+        """Write Stage 3 scores. Status stays ``new`` for the daily digest."""
+        idea = self.get_idea(idea_id)
+        if idea is None:
+            raise KeyError(idea_id)
+        gap = _require_text("gap_description", gap_description)
+        feas = _require_score("feasibility_score", feasibility_score)
+        pain = _require_score("pain_match_score", pain_match_score)
+        novelty = _require_score("novelty_score", novelty_score)
+        composite = float(composite_score)
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE research_ideas SET
+                    gap_description = ?,
+                    feasibility_score = ?,
+                    pain_match_score = ?,
+                    novelty_score = ?,
+                    composite_score = ?,
+                    status = ?
+                WHERE idea_id = ?
+                """,
+                (gap, feas, pain, novelty, composite, STATUS_NEW, idea_id),
+            )
+            self._conn.commit()
+        updated = self.get_idea(idea_id)
+        if updated is None:
+            raise KeyError(idea_id)
+        return updated
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -387,6 +442,16 @@ def _require_text(name: str, value: str) -> str:
 def _validate_enum(name: str, value: str, allowed: frozenset[str]) -> None:
     if value not in allowed:
         raise ValueError(f"Invalid {name} {value!r}; expected one of {sorted(allowed)}")
+
+
+def _require_score(name: str, value: int) -> int:
+    try:
+        score = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer 1-5") from exc
+    if score < 1 or score > 5:
+        raise ValueError(f"{name} must be 1-5, got {score}")
+    return score
 
 
 def _row_to_idea(row: sqlite3.Row) -> ResearchIdea:

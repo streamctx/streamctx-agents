@@ -169,3 +169,36 @@ def test_apply_hype_label_dismisses_marketing_and_counts(store):
     discards = store.list_hype_discards()
     assert len(discards) == 1
     assert discards[0].title == "We raised $20M to 10x your agents"
+
+
+def test_apply_gap_mapping_writes_scores_and_keeps_status_new(store):
+    from agents.research_agent.models import HYPE_TECHNICAL
+
+    idea = store.insert_idea(
+        source_url="https://arxiv.org/abs/gap",
+        source_type=SOURCE_TYPE_ARXIV,
+        title="Memory provenance for agent beliefs",
+        hype_label=HYPE_TECHNICAL,
+    )
+    assert store.list_unscored()[0].idea_id == idea.idea_id
+    updated = store.apply_gap_mapping(
+        idea.idea_id,
+        gap_description="No lineage of which memory write caused a bad tool call.",
+        feasibility_score=4,
+        pain_match_score=5,
+        novelty_score=5,
+        composite_score=4.7,
+    )
+    assert updated.status == STATUS_NEW
+    assert updated.gap_description.startswith("No lineage")
+    assert updated.composite_score == 4.7
+    assert store.list_unscored() == []
+    with pytest.raises(ValueError, match="feasibility_score"):
+        store.apply_gap_mapping(
+            idea.idea_id,
+            gap_description="x",
+            feasibility_score=9,
+            pain_match_score=1,
+            novelty_score=1,
+            composite_score=1.0,
+        )
