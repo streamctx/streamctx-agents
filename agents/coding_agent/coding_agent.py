@@ -17,27 +17,49 @@ import sys
 from streamctx import get_tracker
 
 from agents.coding_agent.pipeline import CodingAgentPipeline
+from agents.coding_agent.models import PipelineRunResult
 from shared.config import AGENT_IDS, BASE_DIR
+
+
+def run(
+    *,
+    source_root: str | None = None,
+    limit: int | None = None,
+    enable_notifications: bool = True,
+    storage=None,
+    db_path=None,
+    fix_generator=None,
+) -> PipelineRunResult:
+    """Run the detect→diagnose→fix pipeline. Tracker is owned by the caller."""
+    with CodingAgentPipeline(
+        source_root=source_root or BASE_DIR,
+        enable_notifications=enable_notifications,
+        storage=storage,
+        db_path=db_path,
+        fix_generator=fix_generator,
+    ) as pipeline:
+        result = pipeline.run(limit=limit)
+        print(f"[coding-agent] {pipeline.summarize(result)}")
+        for item in result.items:
+            entry = item.fix.pending_entry or item.gate.pending_entry
+            if entry is None:
+                continue
+            print(
+                f"  session={entry.session_id} status={entry.status} "
+                f"id={entry.entry_id}"
+            )
+        return result
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     tracker = get_tracker(AGENT_IDS["coding"])
     tracker.start()
     try:
-        with CodingAgentPipeline(
+        run(
             source_root=args.source_root,
+            limit=args.limit,
             enable_notifications=not args.no_notify,
-        ) as pipeline:
-            result = pipeline.run(limit=args.limit)
-            print(f"[coding-agent] {pipeline.summarize(result)}")
-            for item in result.items:
-                entry = item.fix.pending_entry or item.gate.pending_entry
-                if entry is None:
-                    continue
-                print(
-                    f"  session={entry.session_id} status={entry.status} "
-                    f"id={entry.entry_id}"
-                )
+        )
     finally:
         tracker.stop()
     return 0

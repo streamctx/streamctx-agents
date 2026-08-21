@@ -189,6 +189,25 @@ class PendingApprovalStore:
             ).fetchone()
         return _row_to_entry(row) if row else None
 
+    def get_by_source_fingerprint(
+        self, fingerprint: str
+    ) -> Optional[PendingApprovalEntry]:
+        """Earliest row with this fingerprint, any status (idempotency key)."""
+        needle = (fingerprint or "").strip()
+        if not needle:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM pending_approval
+                WHERE source_fingerprint = ?
+                ORDER BY created_at ASC, entry_id ASC
+                LIMIT 1
+                """,
+                (needle,),
+            ).fetchone()
+        return _row_to_entry(row) if row else None
+
     def list_by_status(self, status: str) -> list[PendingApprovalEntry]:
         _validate_enum("status", status, STATUSES)
         with self._lock:

@@ -136,8 +136,50 @@ class PendingApprovalStore:
             ).fetchone()
         return _row_to_entry(dict(row)) if row else None
 
+    def get_by_failed_call_id(self, failed_call_id: int) -> Optional[PendingApprovalEntry]:
+        """Return the earliest row for this failed call, any status."""
+        target = int(failed_call_id)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM pending_approval
+                ORDER BY created_at ASC, entry_id ASC
+                """
+            ).fetchall()
+        for row in rows:
+            if _failed_call_id_from_test_results(row["test_results"]) == target:
+                return _row_to_entry(dict(row))
+        return None
+
+    def known_failed_call_ids(self) -> set[int]:
+        """Every ``failed_call_id`` already recorded, pending or resolved."""
+        ids: set[int] = set()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT test_results FROM pending_approval"
+            ).fetchall()
+        for row in rows:
+            call_id = _failed_call_id_from_test_results(row["test_results"])
+            if call_id is not None:
+                ids.add(call_id)
+        return ids
+
+    def count_entries(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM pending_approval"
+            ).fetchone()
+        return int(row[0])
+
     def create_needs_human_review(self, diagnosis: DiagnosisResult) -> PendingApprovalEntry:
-        """Record a low-confidence or unclear diagnosis for manual review."""
+        """Record a low-confidence or unclear diagnosis for manual review.
+
+        Idempotent: a later run for the same ``failed_call_id`` returns the
+        existing row (any status) instead of inserting a duplicate.
+        """
+        existing = self.get_by_failed_call_id(diagnosis.failed_call_id)
+        if existing is not None:
+            return existing
         return self.create_entry(
             session_id=str(diagnosis.session_id),
             root_cause=diagnosis.root_cause,
@@ -282,6 +324,21 @@ def _serialize_test_results(value: Optional[str | dict[str, Any]]) -> Optional[s
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+def _failed_call_id_from_test_results(raw: Optional[str]) -> Optional[int]:
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("failed_call_id") is None:
+        return None
+    try:
+        return int(payload["failed_call_id"])
+    except (TypeError, ValueError):
+        return None
 
 
 def _diagnosis_context_json(diagnosis: DiagnosisResult) -> str:

@@ -40,10 +40,31 @@ class FailureDiagnostician:
         self.replayer = replayer or CounterfactualReplayer(storage=self.storage)
         self.pattern_store = pattern_store or FixPatternStore()
 
-    def run(self, *, limit: Optional[int] = None) -> list[DiagnosisResult]:
-        """Poll failed calls and return one diagnosis per failure."""
-        failures = poll_failed_calls(storage=self.storage, limit=limit)
-        return [self.diagnose_failure(record) for record in failures]
+    def run(
+        self,
+        *,
+        limit: Optional[int] = None,
+        skip_call_ids: Optional[set[int]] = None,
+    ) -> list[DiagnosisResult]:
+        """Poll failed calls and return one diagnosis per unprocessed failure.
+
+        Historical scan of ``sessions.db`` is deliberate (see README): this
+        agent diagnoses other sessions' failed LLM calls. ``skip_call_ids``
+        drops failures that already have a ``pending_approval`` row so a
+        later ``run()`` does not re-diagnose them. ``limit`` then applies to
+        remaining new failures.
+        """
+        skip = {int(call_id) for call_id in (skip_call_ids or set())}
+        fetch_limit = None if skip else limit
+        failures = poll_failed_calls(storage=self.storage, limit=fetch_limit)
+        diagnoses: list[DiagnosisResult] = []
+        for record in failures:
+            if record.call_id in skip:
+                continue
+            diagnoses.append(self.diagnose_failure(record))
+            if limit is not None and len(diagnoses) >= limit:
+                break
+        return diagnoses
 
     def diagnose_failure(self, failure: FailedCallRecord) -> DiagnosisResult:
         """Attribute, replay-verify, and optionally match a fix pattern."""

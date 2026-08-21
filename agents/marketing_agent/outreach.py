@@ -155,13 +155,16 @@ class Outreach:
         return found
 
     def enqueue_draft(self, lead: ScoredLead) -> Optional[str]:
+        fingerprint = f"outreach|{lead.post.platform}|{lead.post.post_id}"
+        if self.store.get_by_source_fingerprint(fingerprint) is not None:
+            return None
         draft = generate_outreach_draft(lead)
         try:
             prepared = self.safety.prepare(
                 draft,
                 platform=lead.post.platform,
                 store=self.store,
-                fingerprint=f"outreach|{lead.post.platform}|{lead.post.post_id}",
+                fingerprint=fingerprint,
                 content_type=CONTENT_DM,
                 target=lead.post.url,
             )
@@ -174,7 +177,7 @@ class Outreach:
             target=lead.post.url,
             mode=MODE_DRAFT_ONLY,
             status=STATUS_PENDING,
-            source_fingerprint=f"outreach|{lead.post.platform}|{lead.post.post_id}",
+            source_fingerprint=fingerprint,
         )
         return entry.entry_id
 

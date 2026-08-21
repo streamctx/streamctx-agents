@@ -7,11 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
+from agents.coding_agent.coding_agent import run as coding_agent_run
 from agents.coding_agent.fix_generator import FixGenerator
 from agents.coding_agent.models import FixProposal, FixRequest
 from agents.coding_agent.pending_approval import (
     STATUS_NEEDS_HUMAN_REVIEW,
     STATUS_READY_FOR_APPROVAL,
+    PendingApprovalStore,
 )
 from agents.coding_agent.pipeline import CodingAgentPipeline
 from tests.test_diagnose import _seed_drift_failure
@@ -96,6 +98,57 @@ def test_pipeline_approve_and_reject(pipeline, storage):
     rejected = pipeline.reject(entry2.entry_id, reason="Not safe enough.")
     assert rejected.reject_count == 1
     assert rejected.last_rejection_reason == "Not safe enough."
+
+
+def test_coding_agent_run_twice_does_not_duplicate_pending(tmp_path, storage):
+    _seed_drift_failure(storage)
+    db_path = tmp_path / "agent.db"
+
+    def llm_fn(request: FixRequest) -> FixProposal:
+        return FixProposal(
+            diff=FIX_DIFF,
+            regression_test=REGRESSION_TEST,
+            regression_test_path=f"tests/test_regression_session_{request.diagnosis.session_id}.py",
+        )
+
+    first = coding_agent_run(
+        source_root=str(FIXTURE_ROOT),
+        enable_notifications=False,
+        storage=storage,
+        db_path=db_path,
+        fix_generator=FixGenerator(llm_fn=llm_fn),
+    )
+    store = PendingApprovalStore(
+        db_path=db_path,
+        enable_default_notifier=False,
+    )
+    try:
+        after_first = store.count_entries()
+        assert after_first >= 1
+        known = store.known_failed_call_ids()
+        assert known
+    finally:
+        store.close()
+
+    second = coding_agent_run(
+        source_root=str(FIXTURE_ROOT),
+        enable_notifications=False,
+        storage=storage,
+        db_path=db_path,
+        fix_generator=FixGenerator(llm_fn=llm_fn),
+    )
+    store = PendingApprovalStore(
+        db_path=db_path,
+        enable_default_notifier=False,
+    )
+    try:
+        after_second = store.count_entries()
+        assert after_second == after_first
+    finally:
+        store.close()
+
+    assert first.failures_detected == 1
+    assert second.failures_detected == 0
 
 
 def test_pipeline_summarize(pipeline):

@@ -195,6 +195,19 @@ def test_second_enqueue_same_target_is_skipped(store, rules):
     assert len(dms) == 1
 
 
+def test_enqueue_skips_fingerprint_even_after_reject(store, rules):
+    http = _search_http()
+    outreach = Outreach(store, http=http, rules=rules, twitter_bearer="")
+    lead = score_lead(_context_post(), rules)
+    first = outreach.enqueue_draft(lead)
+    assert first
+    store.reject(first)
+    assert outreach.enqueue_draft(lead) is None
+    assert store.get_by_source_fingerprint(
+        f"outreach|{lead.post.platform}|{lead.post.post_id}"
+    ).entry_id == first
+
+
 def test_duplicate_dm_prepare_raises(store):
     gate = SafetyGate(rules=SafetyRules.load(SHIPPED_SAFETY))
     store.create_entry(

@@ -130,6 +130,9 @@ class FixValidationLoop:
         )
 
     def _create_ready_entry(self, *, diagnosis, proposal, test_result, retries_used):
+        existing = self.approval_store.get_by_failed_call_id(diagnosis.failed_call_id)
+        if existing is not None:
+            return existing
         return self.approval_store.create_entry(
             session_id=str(diagnosis.session_id),
             root_cause=diagnosis.root_cause,
@@ -155,6 +158,9 @@ class FixValidationLoop:
         attempted_diffs,
         retries_used,
     ):
+        existing = self.approval_store.get_by_failed_call_id(diagnosis.failed_call_id)
+        if existing is not None:
+            return existing
         return self.approval_store.create_entry(
             session_id=str(diagnosis.session_id),
             root_cause=diagnosis.root_cause,
@@ -173,6 +179,7 @@ class FixValidationLoop:
                     test_result.coverage_delta if test_result else 0.0
                 ),
                 "attempted_diffs": attempted_diffs,
+                "failed_call_id": diagnosis.failed_call_id,
                 "signature_hash": diagnosis.signature_hash,
                 "error_type": diagnosis.error_type,
                 "relevant_file": diagnosis.relevant_file,
@@ -187,6 +194,7 @@ def _test_results_json(test_result: TestResult, diagnosis: DiagnosisResult) -> d
         "passed": test_result.passed,
         "output": test_result.output,
         "coverage_delta": test_result.coverage_delta,
+        "failed_call_id": diagnosis.failed_call_id,
         "signature_hash": diagnosis.signature_hash,
         "error_type": diagnosis.error_type,
         "relevant_file": diagnosis.relevant_file,

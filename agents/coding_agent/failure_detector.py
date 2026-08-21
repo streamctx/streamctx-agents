@@ -27,6 +27,11 @@ def poll_failed_calls(
     """
     Return every call row where ``failed = 1``, newest first.
 
+    Historical scan is intentional: the coding agent diagnoses failed LLM
+    calls across StreamCtx sessions, not only the agent's own current run.
+    Callers must skip ``failed_call_id`` values that already have a
+    ``pending_approval`` row so repeated ``run()`` calls stay idempotent.
+
     Uses the shared StreamCtx SQLite file at ``~/.streamctx/sessions.db``
     unless ``storage`` or ``db_path`` is provided.
     """

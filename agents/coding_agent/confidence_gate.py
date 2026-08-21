@@ -28,6 +28,13 @@ class ConfidenceGate:
 
     def evaluate(self, diagnosis: DiagnosisResult) -> GateResult:
         """Apply the confidence gate to a single diagnosis."""
+        existing = self.approval_store.get_by_failed_call_id(diagnosis.failed_call_id)
+        if existing is not None:
+            return GateResult(
+                diagnosis=diagnosis,
+                pending_entry=existing,
+                proceed_to_fix=False,
+            )
         if _should_stop_for_human_review(diagnosis):
             entry = self.approval_store.create_needs_human_review(diagnosis)
             return GateResult(
@@ -43,8 +50,9 @@ class ConfidenceGate:
         )
 
     def run(self, *, limit: Optional[int] = None) -> list[GateResult]:
-        """Run Stage 2 diagnosis then apply the gate to each failure."""
-        diagnoses = self.diagnostician.run(limit=limit)
+        """Run Stage 2 diagnosis then apply the gate to each new failure."""
+        skip = self.approval_store.known_failed_call_ids()
+        diagnoses = self.diagnostician.run(limit=limit, skip_call_ids=skip)
         return [self.evaluate(diagnosis) for diagnosis in diagnoses]
 
 

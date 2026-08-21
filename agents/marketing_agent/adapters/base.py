@@ -77,6 +77,10 @@ class DraftAdapter(ABC):
             content_type=self.content_type,
             target=target,
         )
+        if fingerprint:
+            existing = self.store.get_by_source_fingerprint(fingerprint)
+            if existing is not None:
+                return existing.entry_id
         entry = self.store.create_entry(
             platform=self.platform,
             content_type=self.content_type,

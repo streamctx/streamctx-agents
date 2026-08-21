@@ -100,6 +100,23 @@ def test_create_needs_human_review_persists_entry(approval_store):
     assert context["reason"] == "test diagnosis"
 
 
+def test_create_needs_human_review_is_idempotent_for_failed_call_id(approval_store):
+    first = approval_store.create_needs_human_review(_diagnosis(confidence=0.4))
+    second = approval_store.create_needs_human_review(_diagnosis(confidence=0.1))
+    assert second.entry_id == first.entry_id
+    assert approval_store.count_entries() == 1
+
+
+def test_gate_evaluate_twice_does_not_insert_a_second_row(approval_store):
+    gate = ConfidenceGate(approval_store=approval_store)
+    first = gate.evaluate(_diagnosis(confidence=0.2))
+    second = gate.evaluate(_diagnosis(confidence=0.2))
+    assert first.pending_entry is not None
+    assert second.pending_entry is not None
+    assert second.pending_entry.entry_id == first.pending_entry.entry_id
+    assert approval_store.count_entries() == 1
+
+
 def test_gate_blocks_low_confidence(approval_store):
     gate = ConfidenceGate(approval_store=approval_store)
     result = gate.evaluate(_diagnosis(confidence=0.55))
