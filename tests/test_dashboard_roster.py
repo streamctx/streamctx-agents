@@ -28,11 +28,15 @@ from dashboard import (
     ROSTER_IDLE,
     ROSTER_WAITING,
     ROSTER_WORKING,
+    DomainSnapshot,
+    PendingItem,
     RosterDbPaths,
     RuntimeState,
     assign_coding_task,
     assign_marketing_task,
+    begin_dashboard_visit,
     build_morning_briefing,
+    compose_briefing_line,
     derive_roster_status,
     load_coding_domain,
     load_competitor_domain,
@@ -356,18 +360,21 @@ def test_load_roster_cards_waiting_and_briefing(paths):
         },
     )
     by_key = {card.key: card for card in cards}
-    assert by_key["coding"].status == ROSTER_WAITING
-    assert by_key["coding"].pending == 4
+    assert by_key["coding"].status == ROSTER_IDLE
+    assert by_key["coding"].backlog == 4
+    assert by_key["coding"].new_pending == 0
     assert by_key["coding"].role == "fixes failing tests"
     assert by_key["coding"].assign_mode == "coding"
     assert by_key["competitor"].assign_mode == "none"
     assert by_key["research"].assign_mode == "none"
     assert by_key["marketing"].assign_mode == "marketing"
-    assert "2h ago" in by_key["coding"].last_activity or "flagged UNCLEAR" in by_key["coding"].last_activity
     assert "flagged UNCLEAR for review" in by_key["coding"].last_activity
+    assert by_key["coding"].briefing_line.startswith("Quiet since")
 
     briefing = build_morning_briefing(cards)
-    assert briefing.pending_total == 6
+    assert briefing.backlog_total == 6
+    assert briefing.new_pending_total == 0
+    assert briefing.attention == ()
     assert briefing.stuck == ()
     assert any(line.startswith("Coding Agent:") for line in briefing.lines)
 
@@ -394,3 +401,119 @@ def test_briefing_flags_stale_open_session(paths):
     assert by_key["coding"].stale_error is True
     briefing = build_morning_briefing(cards)
     assert "Coding Agent" in briefing.stuck
+
+
+def test_backlog_is_not_waiting_but_new_pending_is(paths):
+    idle_cards = load_roster_cards(
+        now=NOW,
+        paths=paths,
+        pending={"coding": 1194, "marketing": 0, "competitor": 0, "research": 0},
+        new_pending={"coding": 0, "marketing": 0, "competitor": 0, "research": 0},
+        sessions={key: None for key in ("coding", "marketing", "competitor", "research")},
+        runtimes={key: RuntimeState(status="idle") for key in ("coding", "marketing", "competitor", "research")},
+    )
+    assert idle_cards[0].status == ROSTER_IDLE
+    assert idle_cards[0].backlog == 1194
+    assert idle_cards[0].new_pending == 0
+
+    waiting_cards = load_roster_cards(
+        now=NOW,
+        paths=paths,
+        pending={"coding": 1194, "marketing": 0, "competitor": 0, "research": 0},
+        new_pending={"coding": 3, "marketing": 0, "competitor": 0, "research": 0},
+        sessions={key: None for key in ("coding", "marketing", "competitor", "research")},
+        runtimes={key: RuntimeState(status="idle") for key in ("coding", "marketing", "competitor", "research")},
+    )
+    assert waiting_cards[0].status == ROSTER_WAITING
+    assert waiting_cards[0].new_pending == 3
+    briefing = build_morning_briefing(waiting_cards)
+    assert briefing.attention == ("Coding Agent (3 new)",)
+    assert briefing.new_pending_total == 3
+    assert briefing.backlog_total == 1194
+
+
+def test_compose_briefing_prefers_recent_completed_else_quiet():
+    recent = DomainSnapshot(
+        last_ts=(NOW - timedelta(days=5)).isoformat(),
+        last_text="flagged UNCLEAR for review",
+        completed_ts=(NOW - timedelta(hours=2)).isoformat(),
+        completed_text="approved a fix",
+    )
+    assert compose_briefing_line(recent, NOW) == "2h ago: approved a fix"
+
+    old = DomainSnapshot(
+        last_ts=(NOW - timedelta(days=5)).isoformat(),
+        last_text="flagged UNCLEAR for review",
+        completed_ts=(NOW - timedelta(days=5)).isoformat(),
+        completed_text="approved a fix",
+    )
+    assert compose_briefing_line(old, NOW) == "Quiet since Aug 16."
+
+    backlog_only = DomainSnapshot(
+        last_ts=(NOW - timedelta(hours=20)).isoformat(),
+        last_text="flagged UNCLEAR for review",
+    )
+    assert compose_briefing_line(backlog_only, NOW) == "Quiet since Aug 20."
+
+
+def test_begin_dashboard_visit_snapshots_previous_open(tmp_path):
+    db = tmp_path / "dashboard_state.db"
+    first_state: dict = {}
+    first_cutoff = begin_dashboard_visit(NOW, first_state, db_path=db)
+    assert first_cutoff is None
+    assert first_state["roster_visit_cutoff"] is None
+    # Same Streamlit session keeps the original cutoff.
+    later = NOW + timedelta(hours=1)
+    assert begin_dashboard_visit(later, first_state, db_path=db) is None
+
+    second_state: dict = {}
+    second_cutoff = begin_dashboard_visit(
+        NOW + timedelta(days=1),
+        second_state,
+        db_path=db,
+    )
+    assert second_cutoff == NOW.isoformat()
+
+
+def test_visit_cutoff_counts_only_new_pending_items():
+    cutoff = (NOW - timedelta(hours=1)).isoformat()
+    items = [
+        PendingItem(
+            agent_key="coding",
+            agent_name="Coding Agent",
+            entry_id="old",
+            status="needs_human_review",
+            created_at=(NOW - timedelta(days=1)).isoformat(),
+            title="old",
+            preview="",
+            store="coding",
+        ),
+        PendingItem(
+            agent_key="coding",
+            agent_name="Coding Agent",
+            entry_id="new",
+            status="needs_human_review",
+            created_at=(NOW - timedelta(minutes=10)).isoformat(),
+            title="new",
+            preview="",
+            store="coding",
+        ),
+        PendingItem(
+            agent_key="marketing",
+            agent_name="Marketing Agent",
+            entry_id="m1",
+            status="pending",
+            created_at=(NOW - timedelta(minutes=5)).isoformat(),
+            title="new m",
+            preview="",
+            store="marketing",
+        ),
+    ]
+    from dashboard import counts_from_pending
+
+    backlog = counts_from_pending(items)
+    new = counts_from_pending(items, cutoff_iso=cutoff)
+    assert backlog["coding"] == 2
+    assert backlog["marketing"] == 1
+    assert new["coding"] == 1
+    assert new["marketing"] == 1

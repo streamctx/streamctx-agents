@@ -12,6 +12,7 @@ scheduler or a new task table.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -55,6 +56,13 @@ from agents.research_agent import research_agent
 from agents.research_agent.storage import DEFAULT_AGENT_DB as RESEARCH_DB
 from shared.audit_log import get_pending_actions, update_status as update_audit_status
 from shared.config import AGENT_IDS, STATUS_APPROVED, STATUS_REJECTED
+
+DASHBOARD_STATE_DB = (
+    Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamctx"))
+    / "dashboard_state.db"
+)
+KV_LAST_DASHBOARD_OPEN = "last_dashboard_open"
+QUIET_AFTER = timedelta(days=2)
 
 AGENT_TAG_PREFIX = "streamctx-agent-id:"
 RESEARCH_TASK_PREFIX = "research:"
@@ -114,6 +122,8 @@ class RosterDbPaths:
 class DomainSnapshot:
     last_ts: Optional[str] = None
     last_text: str = ""
+    completed_ts: Optional[str] = None
+    completed_text: str = ""
     completed_week: int = 0
     errors_week: int = 0
     durable_error: bool = False
@@ -130,7 +140,8 @@ class RosterCard:
     status: str
     last_activity: str
     completed_week: int
-    pending: int
+    new_pending: int
+    backlog: int
     errors_week: int
     briefing_line: str
     stale_error: bool
@@ -140,8 +151,10 @@ class RosterCard:
 @dataclass(frozen=True)
 class MorningBriefing:
     lines: tuple[str, ...]
-    pending_total: int
+    attention: tuple[str, ...]
     stuck: tuple[str, ...]
+    new_pending_total: int
+    backlog_total: int
 
 
 ROSTER_IDLE = "Idle"
@@ -484,11 +497,6 @@ def submit_agent(key: str) -> None:
         _FUTURES[key] = _EXECUTOR.submit(_execute_agent, key)
 
 
-def submit_all_agents() -> None:
-    for spec in AGENTS:
-        submit_agent(spec.key)
-
-
 def any_agent_running() -> bool:
     with _LOCK:
         return any(state.status == "running" for state in _RUNTIME.values())
@@ -660,6 +668,103 @@ def _count_sql(db_path: Optional[Path | str], sql: str, params: tuple = ()) -> i
     return int(next(iter(rows[0].values())))
 
 
+def _dashboard_state_path(db_path: Optional[Path | str] = None) -> Path:
+    return Path(db_path) if db_path is not None else DASHBOARD_STATE_DB
+
+
+def read_dashboard_kv(key: str, *, db_path: Optional[Path | str] = None) -> Optional[str]:
+    path = _dashboard_state_path(db_path)
+    if not path.exists():
+        return None
+    rows = _readonly_query(path, "SELECT value FROM kv WHERE key = ?", (key,))
+    if not rows:
+        return None
+    value = rows[0].get("value")
+    return str(value) if value is not None else None
+
+
+def write_dashboard_kv(
+    key: str,
+    value: str,
+    *,
+    db_path: Optional[Path | str] = None,
+) -> None:
+    path = _dashboard_state_path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def begin_dashboard_visit(
+    now: datetime,
+    session_state: dict[str, Any],
+    *,
+    db_path: Optional[Path | str] = None,
+) -> Optional[str]:
+    """Snapshot last-open time once per Streamlit session, then record this visit.
+
+    Auto-refresh reruns keep the same cutoff so overnight backlog is not
+    reclassified as new every few seconds.
+    """
+    if "roster_visit_cutoff" not in session_state:
+        previous = read_dashboard_kv(KV_LAST_DASHBOARD_OPEN, db_path=db_path)
+        session_state["roster_visit_cutoff"] = previous
+        write_dashboard_kv(KV_LAST_DASHBOARD_OPEN, now.isoformat(), db_path=db_path)
+    return session_state.get("roster_visit_cutoff")
+
+
+def pending_item_is_new(item: PendingItem, cutoff_iso: Optional[str]) -> bool:
+    if not cutoff_iso:
+        return False
+    created = parse_iso(item.created_at)
+    cutoff = parse_iso(cutoff_iso)
+    if created is None or cutoff is None:
+        return str(item.created_at) >= cutoff_iso
+    return created >= cutoff
+
+
+def counts_from_pending(
+    items: list[PendingItem],
+    *,
+    cutoff_iso: Optional[str] = None,
+) -> dict[str, int]:
+    counts = {spec.key: 0 for spec in AGENTS}
+    for item in items:
+        if cutoff_iso is not None and not pending_item_is_new(item, cutoff_iso):
+            continue
+        counts[item.agent_key] = counts.get(item.agent_key, 0) + 1
+    return counts
+
+
+def format_quiet_since(ts: Optional[str]) -> str:
+    parsed = parse_iso(ts)
+    if parsed is None:
+        return "No activity recorded yet."
+    return f"Quiet since {parsed.strftime('%b %d')}."
+
+
+def compose_briefing_line(domain: DomainSnapshot, now: datetime) -> str:
+    """Most recent completed action, or quiet-since if nothing recent."""
+    action_ts = domain.completed_ts
+    action_text = domain.completed_text
+    parsed_action = parse_iso(action_ts)
+    if parsed_action is not None and action_text:
+        if now.astimezone(timezone.utc) - parsed_action < QUIET_AFTER:
+            return f"{relative_time(action_ts, now)}: {action_text}"
+        return format_quiet_since(action_ts)
+    return format_quiet_since(domain.last_ts)
+
+
 def _join_phrases(parts: list[str], empty: str) -> str:
     if not parts:
         return empty
@@ -705,6 +810,19 @@ def load_coding_domain(
     )
     last_ts = str(latest[0]["created_at"]) if latest else None
     last_text = _coding_activity_text(latest[0]) if latest else ""
+    completed_row = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, root_cause
+        FROM pending_approval
+        WHERE status IN (?, ?, ?)
+        ORDER BY created_at DESC, entry_id DESC
+        LIMIT 1
+        """,
+        (CODING_APPROVED, STATUS_READY_FOR_APPROVAL, CODING_REJECTED),
+    )
+    completed_ts = str(completed_row[0]["created_at"]) if completed_row else None
+    completed_text = _coding_activity_text(completed_row[0]) if completed_row else ""
     completed_week = _count_sql(
         db_path,
         "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
@@ -751,6 +869,8 @@ def load_coding_domain(
     return DomainSnapshot(
         last_ts=last_ts,
         last_text=last_text,
+        completed_ts=completed_ts,
+        completed_text=completed_text,
         completed_week=completed_week,
         errors_week=errors_week,
         durable_error=durable_error,
@@ -792,6 +912,28 @@ def load_marketing_domain(
             last_text = f"approved a {platform} {content_type}"
         else:
             last_text = f"queued a {platform} {content_type}"
+    finished = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, platform, content_type,
+               COALESCE(published_at, created_at) AS action_ts
+        FROM pending_approval
+        WHERE status IN (?, ?)
+        ORDER BY COALESCE(published_at, created_at) DESC, entry_id DESC
+        LIMIT 1
+        """,
+        (MARKETING_PUBLISHED, MARKETING_APPROVED),
+    )
+    if finished:
+        row = finished[0]
+        completed_ts = str(row.get("action_ts") or row["created_at"])
+        if str(row.get("status")) == MARKETING_PUBLISHED:
+            completed_text = f"published a {row['platform']} {row['content_type']}"
+        else:
+            completed_text = f"approved a {row['platform']} {row['content_type']}"
+    else:
+        completed_ts = last_ts
+        completed_text = last_text
     completed_week = _count_sql(
         db_path,
         """
@@ -829,6 +971,8 @@ def load_marketing_domain(
     return DomainSnapshot(
         last_ts=last_ts,
         last_text=last_text,
+        completed_ts=completed_ts,
+        completed_text=completed_text,
         completed_week=completed_week,
         briefing_line=_join_phrases(
             parts, "No new completed work since last session."
@@ -947,6 +1091,8 @@ def load_competitor_domain(
     return DomainSnapshot(
         last_ts=last_ts,
         last_text=last_text,
+        completed_ts=last_ts,
+        completed_text=last_text,
         completed_week=n_signals_week + n_reports_week,
         briefing_line=_join_phrases(
             parts, "No new completed work since last session."
@@ -1037,6 +1183,8 @@ def load_research_domain(
     return DomainSnapshot(
         last_ts=last_ts,
         last_text=last_text,
+        completed_ts=last_ts,
+        completed_text=last_text,
         completed_week=completed_week,
         briefing_line=_join_phrases(
             parts, "No new completed work since last session."
@@ -1096,12 +1244,25 @@ def load_roster_cards(
     now: Optional[datetime] = None,
     paths: Optional[RosterDbPaths] = None,
     pending: Optional[dict[str, int]] = None,
+    new_pending: Optional[dict[str, int]] = None,
     sessions: Optional[dict[str, Optional[dict[str, Any]]]] = None,
     runtimes: Optional[dict[str, RuntimeState]] = None,
+    visit_cutoff: Optional[str] = None,
+    pending_items: Optional[list[PendingItem]] = None,
 ) -> list[RosterCard]:
     now = now or datetime.now(timezone.utc)
     paths = paths or RosterDbPaths()
-    counts = pending if pending is not None else pending_counts()
+    if pending is not None and new_pending is None:
+        new_pending = {spec.key: 0 for spec in AGENTS}
+    elif pending is None or new_pending is None:
+        items = pending_items if pending_items is not None else load_pending_approvals()
+        if pending is None:
+            pending = counts_from_pending(items)
+        if new_pending is None:
+            if visit_cutoff:
+                new_pending = counts_from_pending(items, cutoff_iso=visit_cutoff)
+            else:
+                new_pending = {spec.key: 0 for spec in AGENTS}
     week_iso = week_start_utc(now).isoformat()
     today_iso = start_of_utc_day(now).isoformat()
     cards: list[RosterCard] = []
@@ -1124,7 +1285,7 @@ def load_roster_cards(
                 session = latest_session_for_agent(spec.agent_id)
             except Exception:
                 session = None
-        since_iso = _briefing_cutoff_iso(session, now)
+        since_iso = visit_cutoff or _briefing_cutoff_iso(session, now)
         domain = _domain_for_agent(
             spec,
             paths,
@@ -1133,13 +1294,14 @@ def load_roster_cards(
             week_iso=week_iso,
             today_iso=today_iso,
         )
-        pending_n = counts.get(spec.key, 0)
+        backlog_n = pending.get(spec.key, 0)
+        new_n = new_pending.get(spec.key, 0)
         open_session = bool(session and not session.get("ended_at"))
         started_at = str(session["started_at"]) if session and session.get("started_at") else None
         status = derive_roster_status(
             runtime_status=runtime.status,
             runtime_error=runtime.error,
-            pending=pending_n,
+            pending=new_n,
             durable_error=domain.durable_error,
             open_session=open_session,
             session_started_at=started_at,
@@ -1162,9 +1324,10 @@ def load_roster_cards(
                 status=status,
                 last_activity=_format_last_activity(domain, now),
                 completed_week=domain.completed_week,
-                pending=pending_n,
+                new_pending=new_n,
+                backlog=backlog_n,
                 errors_week=domain.errors_week,
-                briefing_line=domain.briefing_line,
+                briefing_line=compose_briefing_line(domain, now),
                 stale_error=stale_error,
                 error_detail=runtime.error,
             )
@@ -1174,13 +1337,18 @@ def load_roster_cards(
 
 def build_morning_briefing(
     cards: list[RosterCard],
-    pending_total: Optional[int] = None,
 ) -> MorningBriefing:
-    total = pending_total if pending_total is not None else sum(card.pending for card in cards)
+    attention = tuple(
+        f"{card.name} ({card.new_pending} new)"
+        for card in cards
+        if card.new_pending > 0
+    )
     return MorningBriefing(
         lines=tuple(f"{card.name}: {card.briefing_line}" for card in cards),
-        pending_total=total,
+        attention=attention,
         stuck=tuple(card.name for card in cards if card.stale_error),
+        new_pending_total=sum(card.new_pending for card in cards),
+        backlog_total=sum(card.backlog for card in cards),
     )
 
 
@@ -1244,7 +1412,9 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
         st.caption(card.last_activity)
         metrics = st.columns(3)
         metrics[0].metric("Completed (week)", card.completed_week)
-        metrics[1].metric("Pending", card.pending)
+        with metrics[1]:
+            st.metric("New since last visit", card.new_pending)
+            st.caption(f"Total backlog: {card.backlog}")
         metrics[2].metric("Errors (week)", card.errors_week)
         if card.status == ROSTER_ERROR and card.error_detail:
             st.error(card.error_detail.splitlines()[0])
@@ -1282,14 +1452,14 @@ def _render_roster_tab(st: Any, cards: list[RosterCard], briefing: MorningBriefi
     with st.container(border=True):
         for line in briefing.lines:
             st.markdown(f"- {line}")
-        if briefing.pending_total:
-            noun = "approval" if briefing.pending_total == 1 else "approvals"
-            st.markdown(
-                f"**{briefing.pending_total} pending {noun}** across all agents — "
-                "open the **Control** tab to review the feed."
+        if briefing.attention:
+            st.warning(
+                "Needs your attention: "
+                + ", ".join(briefing.attention)
+                + " — open the **Control** tab to review."
             )
         else:
-            st.markdown("No pending approvals.")
+            st.caption("No new pending items since last visit.")
         if briefing.stuck:
             st.error("Stuck/erroring since before today: " + ", ".join(briefing.stuck))
         else:
@@ -1353,28 +1523,26 @@ def render() -> None:
         layout="wide",
         page_icon="🎛️",
     )
-    st.title("StreamCtx Agent Control Center")
+    heading, refresh = st.columns([12, 1])
+    with heading:
+        st.title("StreamCtx Agent Control Center")
+    with refresh:
+        st.markdown("<div style='height: 1.15rem'></div>", unsafe_allow_html=True)
+        if st.button("🔄", help="Refresh", key="refresh-dashboard"):
+            st.rerun()
     st.caption(
         "Run history from `~/.streamctx/sessions.db` (StreamCtx WAL storage). "
         "Pending approvals from the per-agent SQLite queues."
     )
+    auto = st.checkbox(
+        f"Auto-refresh every {REFRESH_SECONDS}s",
+        value=False,
+        key="auto_refresh",
+    )
 
-    top = st.columns([1, 1, 2])
-    with top[0]:
-        if st.button("Run All", type="primary", use_container_width=True):
-            submit_all_agents()
-            st.rerun()
-    with top[1]:
-        if st.button("Refresh", use_container_width=True):
-            st.rerun()
-    with top[2]:
-        auto = st.checkbox(
-            f"Auto-refresh every {REFRESH_SECONDS}s",
-            value=False,
-            key="auto_refresh",
-        )
-
-    roster_cards = load_roster_cards()
+    now = datetime.now(timezone.utc)
+    visit_cutoff = begin_dashboard_visit(now, st.session_state)
+    roster_cards = load_roster_cards(now=now, visit_cutoff=visit_cutoff)
     briefing = build_morning_briefing(roster_cards)
     tab_roster, tab_control = st.tabs(["Roster", "Control"])
     with tab_roster:
