@@ -85,12 +85,21 @@ class Sandbox:
 
     def run_tests(self) -> TestResult:
         """Run the full pytest suite in the sandbox venv."""
-        output, returncode = self._run_pytest()
-        coverage = self._parse_coverage(output)
+        return self.run_pytest()
+
+    def run_pytest(
+        self,
+        extra_args: Optional[list[str]] = None,
+        *,
+        coverage: bool = True,
+    ) -> TestResult:
+        """Run pytest with optional extra args (nodeids, ``--ignore``, …)."""
+        output, returncode = self._run_pytest(extra_args=extra_args, coverage=coverage)
+        measured = self._parse_coverage(output) if coverage else self._baseline_coverage
         return TestResult(
             passed=returncode == 0,
             output=output,
-            coverage_delta=coverage - self._baseline_coverage,
+            coverage_delta=measured - self._baseline_coverage,
         )
 
     def reset(self) -> None:
@@ -187,18 +196,22 @@ class Sandbox:
         for cmd in commands:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
 
-    def _run_pytest(self) -> tuple[str, int]:
+    def _run_pytest(
+        self,
+        extra_args: Optional[list[str]] = None,
+        *,
+        coverage: bool = True,
+    ) -> tuple[str, int]:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self._root)
+        cmd = [str(self._venv_python), "-m", "pytest"]
+        if extra_args:
+            cmd.extend(extra_args)
+        if coverage:
+            cmd.extend(["--cov=.", "--cov-report=term-missing"])
+        cmd.append("-q")
         result = subprocess.run(
-            [
-                str(self._venv_python),
-                "-m",
-                "pytest",
-                "--cov=.",
-                "--cov-report=term-missing",
-                "-q",
-            ],
+            cmd,
             cwd=str(self._root),
             capture_output=True,
             text=True,

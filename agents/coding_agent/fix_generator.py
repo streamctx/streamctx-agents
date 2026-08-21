@@ -135,14 +135,22 @@ def _system_prompt() -> str:
 
 def _build_prompt(request: FixRequest) -> str:
     diagnosis = request.diagnosis
-    parts = [
-        f"Error trace:\n{request.error_message}",
-        f"Root cause: {diagnosis.root_cause}",
-        f"Confidence: {diagnosis.confidence}",
-        f"Error type: {diagnosis.error_type}",
-        f"Relevant file(s): {diagnosis.relevant_file}",
-        f"Attribution reason: {diagnosis.reason}",
-    ]
+    if diagnosis.root_cause == "INTAKE":
+        parts = [
+            "Human-approved task (skip diagnosis; fix the named pytest failures):",
+            diagnosis.reason,
+            f"Error trace:\n{request.error_message}",
+            f"Relevant file(s): {diagnosis.relevant_file}",
+        ]
+    else:
+        parts = [
+            f"Error trace:\n{request.error_message}",
+            f"Root cause: {diagnosis.root_cause}",
+            f"Confidence: {diagnosis.confidence}",
+            f"Error type: {diagnosis.error_type}",
+            f"Relevant file(s): {diagnosis.relevant_file}",
+            f"Attribution reason: {diagnosis.reason}",
+        ]
 
     if request.pattern_template and request.attempt > 0:
         parts.append(f"Prior fix template:\n{request.pattern_template}")

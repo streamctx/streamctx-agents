@@ -60,6 +60,18 @@ def test_apply_invalid_diff_raises(sandbox: Sandbox):
         sandbox.apply_diff("not a valid unified diff")
 
 
+def test_run_pytest_scoped_nodeid_and_full_suite_ignore(sandbox: Sandbox):
+    scoped = sandbox.run_pytest(["tests/test_broken_math.py::test_add"], coverage=False)
+    assert scoped.passed is False
+
+    sandbox.apply_diff(FIX_DIFF)
+    scoped_ok = sandbox.run_pytest(["tests/test_broken_math.py::test_add"], coverage=False)
+    assert scoped_ok.passed is True
+
+    full = sandbox.run_pytest(["tests/", "--ignore=tests/fixtures"], coverage=False)
+    assert full.passed is True
+
+
 def test_test_result_has_expected_fields(sandbox: Sandbox):
     result = sandbox.run_tests()
     assert isinstance(result.passed, bool)

@@ -37,20 +37,21 @@ from agents.coding_agent.pending_approval import (
     STATUS_READY_FOR_APPROVAL,
     STATUS_REJECTED as CODING_REJECTED,
     PendingApprovalStore as CodingStore,
+    is_intake_task,
 )
 from agents.competitor_agent import competitor_agent
 from agents.competitor_agent.storage import DEFAULT_AGENT_DB as COMPETITOR_DB
 from agents.marketing_agent import marketing_agent
 from agents.marketing_agent.pending_approval import (
-    CONTENT_POST,
+    BRIEF_FINGERPRINT_PREFIX,
     DEFAULT_AGENT_DB as MARKETING_DB,
-    MODE_DRAFT_ONLY,
-    PLATFORM_LINKEDIN,
     STATUS_APPROVED as MARKETING_APPROVED,
+    STATUS_DRAFT_FAILED,
     STATUS_PENDING as MARKETING_PENDING,
     STATUS_PUBLISHED as MARKETING_PUBLISHED,
     STATUS_REJECTED as MARKETING_REJECTED,
     PendingApprovalStore as MarketingStore,
+    is_marketing_brief,
 )
 from agents.research_agent import research_agent
 from agents.research_agent.storage import DEFAULT_AGENT_DB as RESEARCH_DB
@@ -70,6 +71,10 @@ CODING_PENDING_STATUSES = (
     STATUS_NEEDS_HUMAN_REVIEW,
     STATUS_READY_FOR_APPROVAL,
     STATUS_AUTO_FIX_FAILED,
+)
+MARKETING_PENDING_STATUSES = (
+    MARKETING_PENDING,
+    STATUS_DRAFT_FAILED,
 )
 REFRESH_SECONDS = 3
 MAX_PREVIEW_CHARS = 480
@@ -324,20 +329,21 @@ def _load_marketing_pending() -> list[PendingItem]:
     store = MarketingStore(enable_default_notifier=False)
     try:
         items: list[PendingItem] = []
-        for entry in store.list_by_status(MARKETING_PENDING):
-            target = f" → {entry.target}" if entry.target else ""
-            items.append(
-                PendingItem(
-                    agent_key="marketing",
-                    agent_name=AGENT_BY_KEY["marketing"].name,
-                    entry_id=entry.entry_id,
-                    status=entry.status,
-                    created_at=entry.created_at,
-                    title=f"{entry.platform} {entry.content_type}{target}",
-                    preview=_clip(entry.content),
-                    store="marketing",
+        for status in MARKETING_PENDING_STATUSES:
+            for entry in store.list_by_status(status):
+                target = f" → {entry.target}" if entry.target else ""
+                items.append(
+                    PendingItem(
+                        agent_key="marketing",
+                        agent_name=AGENT_BY_KEY["marketing"].name,
+                        entry_id=entry.entry_id,
+                        status=entry.status,
+                        created_at=entry.created_at,
+                        title=f"{entry.platform} {entry.content_type}{target}",
+                        preview=_clip(entry.content),
+                        store="marketing",
+                    )
                 )
-            )
         return items
     finally:
         store.close()
@@ -392,20 +398,35 @@ def pending_counts() -> dict[str, int]:
     return counts
 
 
-def approve_entry(item: PendingItem) -> None:
+def approve_entry(
+    item: PendingItem,
+    *,
+    coding_db: Optional[Path | str] = None,
+    marketing_db: Optional[Path | str] = None,
+) -> None:
     if item.store == "coding":
-        store = CodingStore(enable_default_notifier=False)
+        store = CodingStore(db_path=coding_db, enable_default_notifier=False)
+        kick_off = False
         try:
+            entry = store.get_entry(item.entry_id)
+            kick_off = entry is not None and is_intake_task(entry)
             store.update_status(item.entry_id, CODING_APPROVED)
         finally:
             store.close()
+        if kick_off:
+            submit_intake_fix(item.entry_id, db_path=coding_db)
         return
     if item.store == "marketing":
-        store = MarketingStore(enable_default_notifier=False)
+        store = MarketingStore(db_path=marketing_db, enable_default_notifier=False)
+        kick_off = False
         try:
+            entry = store.get_entry(item.entry_id)
+            kick_off = entry is not None and is_marketing_brief(entry)
             store.approve(item.entry_id)
         finally:
             store.close()
+        if kick_off:
+            submit_draft_job(item.entry_id, db_path=marketing_db)
         return
     update_audit_status(item.entry_id, STATUS_APPROVED, approved_by="dashboard")
 
@@ -495,6 +516,105 @@ def submit_agent(key: str) -> None:
         current.error = None
         current.summary = "starting…"
         _FUTURES[key] = _EXECUTOR.submit(_execute_agent, key)
+
+
+def submit_intake_fix(
+    entry_id: str,
+    *,
+    db_path: Optional[Path | str] = None,
+    source_root: Optional[Path | str] = None,
+) -> None:
+    """Kick off Path-B fix generation after a human approves an INTAKE ticket."""
+    key = f"intake-fix:{entry_id}"
+    with _LOCK:
+        future = _FUTURES.get(key)
+        if future is not None and not future.done():
+            return
+        coding = _RUNTIME["coding"]
+        coding.status = "running"
+        coding.error = None
+        coding.summary = "generating fix from assigned task…"
+        _FUTURES[key] = _EXECUTOR.submit(
+            _execute_intake_fix, entry_id, db_path, source_root
+        )
+
+
+def _execute_intake_fix(
+    entry_id: str,
+    db_path: Optional[Path | str],
+    source_root: Optional[Path | str],
+) -> Any:
+    from agents.coding_agent.intake_fix import process_approved_intake
+
+    try:
+        result = process_approved_intake(
+            entry_id,
+            db_path=db_path,
+            source_root=source_root,
+        )
+        with _LOCK:
+            _RUNTIME["coding"].status = "completed"
+            _RUNTIME["coding"].last_run = _now_iso()
+            _RUNTIME["coding"].error = None
+            _RUNTIME["coding"].summary = result.reason
+        return result
+    except Exception as exc:
+        with _LOCK:
+            _RUNTIME["coding"].status = "failed"
+            _RUNTIME["coding"].last_run = _now_iso()
+            _RUNTIME["coding"].error = f"{exc}\n{traceback.format_exc()}"
+            _RUNTIME["coding"].summary = str(exc)
+        try:
+            store = CodingStore(db_path=db_path, enable_default_notifier=False)
+            store.merge_test_results(
+                entry_id,
+                {"fix_status": STATUS_AUTO_FIX_FAILED, "fix_error": str(exc)},
+            )
+            store.close()
+        except Exception:
+            pass
+        raise
+
+
+def submit_draft_job(
+    entry_id: str,
+    *,
+    db_path: Optional[Path | str] = None,
+) -> None:
+    """Kick off LinkedIn draft generation after a human approves a brief."""
+    key = f"draft-job:{entry_id}"
+    with _LOCK:
+        future = _FUTURES.get(key)
+        if future is not None and not future.done():
+            return
+        marketing = _RUNTIME["marketing"]
+        marketing.status = "running"
+        marketing.error = None
+        marketing.summary = "generating LinkedIn draft from assigned brief…"
+        _FUTURES[key] = _EXECUTOR.submit(_execute_draft_job, entry_id, db_path)
+
+
+def _execute_draft_job(
+    entry_id: str,
+    db_path: Optional[Path | str],
+) -> Any:
+    from agents.marketing_agent.draft_job import process_approved_brief
+
+    try:
+        result = process_approved_brief(entry_id, db_path=db_path)
+        with _LOCK:
+            _RUNTIME["marketing"].status = "completed"
+            _RUNTIME["marketing"].last_run = _now_iso()
+            _RUNTIME["marketing"].error = None
+            _RUNTIME["marketing"].summary = result.reason
+        return result
+    except Exception as exc:
+        with _LOCK:
+            _RUNTIME["marketing"].status = "failed"
+            _RUNTIME["marketing"].last_run = _now_iso()
+            _RUNTIME["marketing"].error = f"{exc}\n{traceback.format_exc()}"
+            _RUNTIME["marketing"].summary = str(exc)
+        raise
 
 
 def any_agent_running() -> bool:
@@ -776,7 +896,16 @@ def _join_phrases(parts: list[str], empty: str) -> str:
 def _coding_activity_text(row: dict[str, Any]) -> str:
     status = str(row.get("status") or "")
     root = str(row.get("root_cause") or "")
+    has_diff = bool(str(row.get("diff") or "").strip())
     if root == ROOT_CAUSE_INTAKE:
+        if status == STATUS_READY_FOR_APPROVAL:
+            return "queued a fix for approval"
+        if status == STATUS_AUTO_FIX_FAILED:
+            return "auto-fix failed"
+        if status == CODING_APPROVED:
+            return "approved a fix" if has_diff else "approved an assigned task"
+        if status == CODING_REJECTED:
+            return "rejected a fix"
         return "queued an assigned task"
     if status == STATUS_AUTO_FIX_FAILED:
         return "auto-fix failed"
@@ -802,7 +931,7 @@ def load_coding_domain(
     latest = _readonly_query(
         db_path,
         """
-        SELECT created_at, status, root_cause
+        SELECT created_at, status, root_cause, diff
         FROM pending_approval
         ORDER BY created_at DESC, entry_id DESC
         LIMIT 1
@@ -813,19 +942,29 @@ def load_coding_domain(
     completed_row = _readonly_query(
         db_path,
         """
-        SELECT created_at, status, root_cause
+        SELECT created_at, status, root_cause, diff
         FROM pending_approval
         WHERE status IN (?, ?, ?)
+          AND NOT (
+            root_cause = ?
+            AND (diff IS NULL OR TRIM(COALESCE(diff, '')) = '')
+          )
         ORDER BY created_at DESC, entry_id DESC
         LIMIT 1
         """,
-        (CODING_APPROVED, STATUS_READY_FOR_APPROVAL, CODING_REJECTED),
+        (CODING_APPROVED, STATUS_READY_FOR_APPROVAL, CODING_REJECTED, ROOT_CAUSE_INTAKE),
     )
     completed_ts = str(completed_row[0]["created_at"]) if completed_row else None
     completed_text = _coding_activity_text(completed_row[0]) if completed_row else ""
     completed_week = _count_sql(
         db_path,
-        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ?
+          AND created_at >= ?
+          AND diff IS NOT NULL
+          AND TRIM(diff) != ''
+        """,
         (CODING_APPROVED, week_iso),
     )
     errors_week = _count_sql(
@@ -851,7 +990,13 @@ def load_coding_domain(
     )
     approved = _count_sql(
         db_path,
-        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ?
+          AND created_at >= ?
+          AND diff IS NOT NULL
+          AND TRIM(diff) != ''
+        """,
         (CODING_APPROVED, since_iso),
     )
     ready = _count_sql(
@@ -881,6 +1026,27 @@ def load_coding_domain(
     )
 
 
+def _marketing_activity_text(row: dict[str, Any]) -> str:
+    platform = str(row.get("platform") or "draft")
+    content_type = str(row.get("content_type") or "post")
+    status = str(row.get("status") or "")
+    fingerprint = str(row.get("source_fingerprint") or "")
+    is_brief = fingerprint.startswith(BRIEF_FINGERPRINT_PREFIX)
+    if is_brief:
+        if status == MARKETING_APPROVED:
+            return "approved an assigned brief"
+        if status == STATUS_DRAFT_FAILED:
+            return "draft generation failed"
+        return "queued an assigned brief"
+    if status == MARKETING_PUBLISHED:
+        return f"published a {platform} {content_type}"
+    if status == MARKETING_APPROVED:
+        return f"approved a {platform} {content_type}"
+    if status == STATUS_DRAFT_FAILED:
+        return "draft generation failed"
+    return f"queued a {platform} {content_type}"
+
+
 def load_marketing_domain(
     db_path: Optional[Path | str],
     *,
@@ -890,47 +1056,35 @@ def load_marketing_domain(
     today_iso: str,
 ) -> DomainSnapshot:
     del now, today_iso
+    brief_like = f"{BRIEF_FINGERPRINT_PREFIX}%"
     latest = _readonly_query(
         db_path,
         """
-        SELECT created_at, status, platform, content_type
+        SELECT created_at, status, platform, content_type, source_fingerprint
         FROM pending_approval
         ORDER BY created_at DESC, entry_id DESC
         LIMIT 1
         """,
     )
     last_ts = str(latest[0]["created_at"]) if latest else None
-    last_text = ""
-    if latest:
-        row = latest[0]
-        platform = str(row.get("platform") or "draft")
-        content_type = str(row.get("content_type") or "post")
-        status = str(row.get("status") or "")
-        if status == MARKETING_PUBLISHED:
-            last_text = f"published a {platform} {content_type}"
-        elif status == MARKETING_APPROVED:
-            last_text = f"approved a {platform} {content_type}"
-        else:
-            last_text = f"queued a {platform} {content_type}"
+    last_text = _marketing_activity_text(latest[0]) if latest else ""
     finished = _readonly_query(
         db_path,
         """
-        SELECT created_at, status, platform, content_type,
+        SELECT created_at, status, platform, content_type, source_fingerprint,
                COALESCE(published_at, created_at) AS action_ts
         FROM pending_approval
         WHERE status IN (?, ?)
+          AND NOT (source_fingerprint LIKE ?)
         ORDER BY COALESCE(published_at, created_at) DESC, entry_id DESC
         LIMIT 1
         """,
-        (MARKETING_PUBLISHED, MARKETING_APPROVED),
+        (MARKETING_PUBLISHED, MARKETING_APPROVED, brief_like),
     )
     if finished:
         row = finished[0]
         completed_ts = str(row.get("action_ts") or row["created_at"])
-        if str(row.get("status")) == MARKETING_PUBLISHED:
-            completed_text = f"published a {row['platform']} {row['content_type']}"
-        else:
-            completed_text = f"approved a {row['platform']} {row['content_type']}"
+        completed_text = _marketing_activity_text(row)
     else:
         completed_ts = last_ts
         completed_text = last_text
@@ -939,9 +1093,18 @@ def load_marketing_domain(
         """
         SELECT COUNT(*) AS n FROM pending_approval
         WHERE (status = ? AND COALESCE(published_at, created_at) >= ?)
-           OR (status = ? AND created_at >= ?)
+           OR (
+             status = ?
+             AND created_at >= ?
+             AND (source_fingerprint IS NULL OR source_fingerprint NOT LIKE ?)
+           )
         """,
-        (MARKETING_PUBLISHED, week_iso, MARKETING_APPROVED, week_iso),
+        (MARKETING_PUBLISHED, week_iso, MARKETING_APPROVED, week_iso, brief_like),
+    )
+    errors_week = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (STATUS_DRAFT_FAILED, week_iso),
     )
     published = _count_sql(
         db_path,
@@ -953,8 +1116,13 @@ def load_marketing_domain(
     )
     approved = _count_sql(
         db_path,
-        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
-        (MARKETING_APPROVED, since_iso),
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ?
+          AND created_at >= ?
+          AND (source_fingerprint IS NULL OR source_fingerprint NOT LIKE ?)
+        """,
+        (MARKETING_APPROVED, since_iso, brief_like),
     )
     queued = _count_sql(
         db_path,
@@ -974,6 +1142,7 @@ def load_marketing_domain(
         completed_ts=completed_ts,
         completed_text=completed_text,
         completed_week=completed_week,
+        errors_week=errors_week,
         briefing_line=_join_phrases(
             parts, "No new completed work since last session."
         ),
@@ -1379,17 +1548,11 @@ def assign_marketing_task(
     *,
     db_path: Optional[Path | str] = None,
 ) -> str:
-    body = (text or "").strip()
-    if not body:
-        raise ValueError("task is empty")
+    from agents.marketing_agent.draft_job import create_brief_task
+
     store = MarketingStore(db_path=db_path, enable_default_notifier=False)
     try:
-        entry = store.create_entry(
-            platform=PLATFORM_LINKEDIN,
-            content_type=CONTENT_POST,
-            content=body,
-            mode=MODE_DRAFT_ONLY,
-        )
+        entry = create_brief_task(text, store=store)
         return entry.entry_id
     finally:
         store.close()
@@ -1441,7 +1604,7 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
                             st.success("Queued as coding intake.")
                         elif card.assign_mode == "marketing":
                             assign_marketing_task(body)
-                            st.success("Queued as a LinkedIn draft.")
+                            st.success("Queued as a LinkedIn brief.")
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))

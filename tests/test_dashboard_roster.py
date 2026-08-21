@@ -16,11 +16,13 @@ from agents.coding_agent.pending_approval import (
 )
 from agents.competitor_agent.storage import CompetitorStore
 from agents.marketing_agent.pending_approval import (
+    BRIEF_FINGERPRINT_PREFIX,
     CONTENT_POST,
     MODE_DRAFT_ONLY,
     PLATFORM_LINKEDIN,
     STATUS_PENDING,
     PendingApprovalStore as MarketingStore,
+    is_marketing_brief,
 )
 from agents.research_agent.storage import ResearchStore
 from dashboard import (
@@ -32,6 +34,7 @@ from dashboard import (
     PendingItem,
     RosterDbPaths,
     RuntimeState,
+    approve_entry,
     assign_coding_task,
     assign_marketing_task,
     begin_dashboard_visit,
@@ -155,6 +158,8 @@ def test_assign_marketing_task_queues_linkedin_draft_only(paths):
         assert entry.mode == MODE_DRAFT_ONLY
         assert entry.status == STATUS_PENDING
         assert entry.content == "Draft a post about the new roster view."
+        assert is_marketing_brief(entry) is True
+        assert (entry.source_fingerprint or "").startswith(BRIEF_FINGERPRINT_PREFIX)
     finally:
         store.close()
 
@@ -212,6 +217,213 @@ def test_coding_domain_activity_and_week_stats(paths):
     assert snap.errors_week == 1
     assert snap.durable_error is True
     assert "approved 1 fix" in snap.briefing_line.lower()
+
+
+def test_completed_week_ignores_approved_intake_without_a_diff(paths):
+    store = CodingStore(db_path=paths.coding, enable_default_notifier=False)
+    try:
+        intake = store.create_intake_task(
+            task_ref="dashboard:ticket",
+            summary="Fix four failing tests",
+            request="Please fix tests/test_safety.py::test_rejected_entries_do_not_block_duplicates",
+        )
+        store.update_status(intake.entry_id, "approved")
+        real = store.create_entry(
+            session_id="fix-1",
+            root_cause="DRIFT",
+            confidence=0.9,
+            matched_pattern_id=None,
+            diff="--- a\n+++ b\n",
+            regression_test=None,
+            test_results=None,
+            retries_used=1,
+            status="ready_for_approval",
+        )
+        store.update_status(real.entry_id, "approved")
+    finally:
+        store.close()
+
+    snap = load_coding_domain(
+        paths.coding,
+        now=NOW,
+        since_iso=(NOW - timedelta(days=1)).isoformat(),
+        week_iso=week_start_utc(NOW).isoformat(),
+        today_iso=datetime(2026, 8, 21, tzinfo=timezone.utc).isoformat(),
+    )
+    assert snap.completed_week == 1
+    assert "approved 1 fix" in snap.briefing_line.lower()
+
+
+def test_approve_intake_kicks_off_fix_job(paths, monkeypatch):
+    store = CodingStore(db_path=paths.coding, enable_default_notifier=False)
+    try:
+        entry = store.create_intake_task(
+            task_ref="dashboard:ticket",
+            summary="Fix tests",
+            request="fix tests/test_broken_math.py::test_add",
+        )
+    finally:
+        store.close()
+
+    called: dict[str, object] = {}
+
+    def fake_submit(entry_id, *, db_path=None, source_root=None):
+        called["entry_id"] = entry_id
+        called["db_path"] = db_path
+
+    monkeypatch.setattr("dashboard.submit_intake_fix", fake_submit)
+    item = PendingItem(
+        agent_key="coding",
+        agent_name="Coding Agent",
+        entry_id=entry.entry_id,
+        status=STATUS_NEEDS_HUMAN_REVIEW,
+        created_at=NOW.isoformat(),
+        title="INTAKE",
+        preview="fix tests",
+        store="coding",
+    )
+    approve_entry(item, coding_db=paths.coding)
+    assert called["entry_id"] == entry.entry_id
+    assert called["db_path"] == paths.coding
+
+    store = CodingStore(db_path=paths.coding, enable_default_notifier=False)
+    try:
+        updated = store.get_entry(entry.entry_id)
+        assert updated is not None
+        assert updated.status == "approved"
+    finally:
+        store.close()
+
+
+def test_approve_generated_fix_does_not_start_intake_job(paths, monkeypatch):
+    store = CodingStore(db_path=paths.coding, enable_default_notifier=False)
+    try:
+        entry = store.create_entry(
+            session_id="1",
+            root_cause="DRIFT",
+            confidence=0.9,
+            matched_pattern_id=None,
+            diff="--- a\n+++ b\n",
+            regression_test=None,
+            test_results=None,
+            retries_used=0,
+            status="ready_for_approval",
+        )
+    finally:
+        store.close()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("intake fix must not run for Path A approvals")
+
+    monkeypatch.setattr("dashboard.submit_intake_fix", boom)
+    item = PendingItem(
+        agent_key="coding",
+        agent_name="Coding Agent",
+        entry_id=entry.entry_id,
+        status="ready_for_approval",
+        created_at=NOW.isoformat(),
+        title="DRIFT",
+        preview="diff",
+        store="coding",
+    )
+    approve_entry(item, coding_db=paths.coding)
+
+
+def test_approve_marketing_brief_kicks_off_draft_job(paths, monkeypatch):
+    entry_id = assign_marketing_task(
+        "Draft a post about the new roster view.",
+        db_path=paths.marketing,
+    )
+    called: dict[str, object] = {}
+
+    def fake_submit(entry_id, *, db_path=None):
+        called["entry_id"] = entry_id
+        called["db_path"] = db_path
+
+    monkeypatch.setattr("dashboard.submit_draft_job", fake_submit)
+    item = PendingItem(
+        agent_key="marketing",
+        agent_name="Marketing Agent",
+        entry_id=entry_id,
+        status=STATUS_PENDING,
+        created_at=NOW.isoformat(),
+        title="linkedin post",
+        preview="Draft a post",
+        store="marketing",
+    )
+    approve_entry(item, marketing_db=paths.marketing)
+    assert called["entry_id"] == entry_id
+    assert called["db_path"] == paths.marketing
+
+    store = MarketingStore(db_path=paths.marketing, enable_default_notifier=False)
+    try:
+        updated = store.get_entry(entry_id)
+        assert updated is not None
+        assert updated.status == "approved"
+    finally:
+        store.close()
+
+
+def test_approve_generated_linkedin_draft_does_not_start_draft_job(paths, monkeypatch):
+    store = MarketingStore(db_path=paths.marketing, enable_default_notifier=False)
+    try:
+        entry = store.create_entry(
+            platform=PLATFORM_LINKEDIN,
+            content_type=CONTENT_POST,
+            content="Already-formatted changelog post.",
+            mode=MODE_DRAFT_ONLY,
+        )
+    finally:
+        store.close()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("draft job must not run for generated drafts")
+
+    monkeypatch.setattr("dashboard.submit_draft_job", boom)
+    item = PendingItem(
+        agent_key="marketing",
+        agent_name="Marketing Agent",
+        entry_id=entry.entry_id,
+        status=STATUS_PENDING,
+        created_at=NOW.isoformat(),
+        title="linkedin post",
+        preview="changelog",
+        store="marketing",
+    )
+    approve_entry(item, marketing_db=paths.marketing)
+
+
+def test_completed_week_ignores_approved_marketing_brief(paths):
+    store = MarketingStore(db_path=paths.marketing, enable_default_notifier=False)
+    try:
+        brief = store.create_entry(
+            platform=PLATFORM_LINKEDIN,
+            content_type=CONTENT_POST,
+            content="Draft a post about the roster.",
+            mode=MODE_DRAFT_ONLY,
+            source_fingerprint=f"{BRIEF_FINGERPRINT_PREFIX}ticket",
+        )
+        store.approve(brief.entry_id)
+        real = store.create_entry(
+            platform=PLATFORM_LINKEDIN,
+            content_type=CONTENT_POST,
+            content="Generated LinkedIn copy about the Roster tab.",
+            mode=MODE_DRAFT_ONLY,
+            source_fingerprint="dashboard-draft:parent",
+        )
+        store.approve(real.entry_id)
+    finally:
+        store.close()
+
+    snap = load_marketing_domain(
+        paths.marketing,
+        now=NOW,
+        since_iso=(NOW - timedelta(days=1)).isoformat(),
+        week_iso=week_start_utc(NOW).isoformat(),
+        today_iso=datetime(2026, 8, 21, tzinfo=timezone.utc).isoformat(),
+    )
+    assert snap.completed_week == 1
+    assert "approved 1 draft" in snap.briefing_line.lower()
 
 
 def test_coding_stale_auto_fix_before_today(paths):

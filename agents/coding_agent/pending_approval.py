@@ -23,6 +23,12 @@ STATUS_REJECTED = "rejected"
 
 ROOT_CAUSE_INTAKE = "INTAKE"
 INTAKE_KIND = "intake"
+INTAKE_FIX_KIND = "intake_fix"
+INTAKE_CHILD_SESSION_PREFIX = "intake-fix:"
+FIX_STATUS_CANNOT_PARSE = "cannot_parse_tests"
+FIX_STATUS_GENERATING = "generating"
+FIX_STATUS_READY = "ready_for_approval"
+FIX_STATUS_FAILED = "auto_fix_failed"
 
 NotifierFn = Callable[[PendingApprovalEntry], None]
 
@@ -122,6 +128,28 @@ class PendingApprovalStore:
             retries_used=0,
             status=STATUS_NEEDS_HUMAN_REVIEW,
         )
+
+    def merge_test_results(
+        self,
+        entry_id: str,
+        patch: dict[str, Any],
+    ) -> Optional[PendingApprovalEntry]:
+        """Shallow-merge ``patch`` into the JSON ``test_results`` payload."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT test_results FROM pending_approval WHERE entry_id = ?",
+                (entry_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = _parse_test_results_dict(row["test_results"])
+            payload.update(patch)
+            self._conn.execute(
+                "UPDATE pending_approval SET test_results = ? WHERE entry_id = ?",
+                (json.dumps(payload, ensure_ascii=False), entry_id),
+            )
+            self._conn.commit()
+        return self.get_entry(entry_id)
 
     def get_latest_by_session_id(self, session_id: str) -> Optional[PendingApprovalEntry]:
         with self._lock:
@@ -326,14 +354,36 @@ def _serialize_test_results(value: Optional[str | dict[str, Any]]) -> Optional[s
     return json.dumps(value, ensure_ascii=False)
 
 
-def _failed_call_id_from_test_results(raw: Optional[str]) -> Optional[int]:
+def intake_child_session_id(parent_entry_id: str) -> str:
+    return f"{INTAKE_CHILD_SESSION_PREFIX}{parent_entry_id}"
+
+
+def parse_test_results(entry: PendingApprovalEntry) -> dict[str, Any]:
+    return _parse_test_results_dict(entry.test_results)
+
+
+def is_intake_task(entry: PendingApprovalEntry) -> bool:
+    """True for a human-assigned intake ticket that has no generated diff yet."""
+    if str(entry.root_cause) != ROOT_CAUSE_INTAKE:
+        return False
+    if (entry.diff or "").strip():
+        return False
+    return parse_test_results(entry).get("kind") == INTAKE_KIND
+
+
+def _parse_test_results_dict(raw: Optional[str]) -> dict[str, Any]:
     if not raw:
-        return None
+        return {}
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict) or payload.get("failed_call_id") is None:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _failed_call_id_from_test_results(raw: Optional[str]) -> Optional[int]:
+    payload = _parse_test_results_dict(raw)
+    if payload.get("failed_call_id") is None:
         return None
     try:
         return int(payload["failed_call_id"])

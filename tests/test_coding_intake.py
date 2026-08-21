@@ -11,6 +11,8 @@ from agents.coding_agent.pending_approval import (
     ROOT_CAUSE_INTAKE,
     STATUS_NEEDS_HUMAN_REVIEW,
     PendingApprovalStore,
+    is_intake_task,
+    parse_test_results,
 )
 
 
@@ -44,6 +46,25 @@ def test_create_intake_task_queues_review_without_a_diff(store):
     assert payload["idea_id"] == "idea-1"
     listed = store.list_by_status(STATUS_NEEDS_HUMAN_REVIEW)
     assert [item.entry_id for item in listed] == [entry.entry_id]
+    assert is_intake_task(entry) is True
+
+
+def test_merge_test_results_keeps_intake_fields(store):
+    entry = store.create_intake_task(
+        task_ref="research:idea-1",
+        summary="Struggle score on traces",
+        request="Prototype this as a proof-of-concept branch.",
+    )
+    updated = store.merge_test_results(
+        entry.entry_id,
+        {"child_entry_id": "child-1", "fix_status": "ready_for_approval"},
+    )
+    payload = parse_test_results(updated)
+    assert payload["kind"] == INTAKE_KIND
+    assert payload["summary"] == "Struggle score on traces"
+    assert payload["child_entry_id"] == "child-1"
+    assert payload["fix_status"] == "ready_for_approval"
+    assert is_intake_task(updated) is True
 
 
 def test_create_intake_task_is_idempotent_for_the_same_task_ref(store):

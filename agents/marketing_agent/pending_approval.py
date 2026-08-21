@@ -56,9 +56,19 @@ STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
 STATUS_PUBLISHED = "published"
+STATUS_DRAFT_FAILED = "draft_failed"
 STATUSES = frozenset(
-    {STATUS_PENDING, STATUS_APPROVED, STATUS_REJECTED, STATUS_PUBLISHED}
+    {
+        STATUS_PENDING,
+        STATUS_APPROVED,
+        STATUS_REJECTED,
+        STATUS_PUBLISHED,
+        STATUS_DRAFT_FAILED,
+    }
 )
+
+BRIEF_FINGERPRINT_PREFIX = "dashboard-brief:"
+DRAFT_FINGERPRINT_PREFIX = "dashboard-draft:"
 
 NotifierFn = Callable[["PendingApprovalEntry"], None]
 
@@ -336,3 +346,17 @@ def _row_to_entry(row: sqlite3.Row) -> PendingApprovalEntry:
         published_at=data.get("published_at"),
         source_fingerprint=data.get("source_fingerprint"),
     )
+
+
+def new_brief_fingerprint() -> str:
+    return f"{BRIEF_FINGERPRINT_PREFIX}{uuid.uuid4()}"
+
+
+def draft_child_fingerprint(parent_entry_id: str) -> str:
+    return f"{DRAFT_FINGERPRINT_PREFIX}{parent_entry_id}"
+
+
+def is_marketing_brief(entry: PendingApprovalEntry) -> bool:
+    """True for a Roster Assign brief that is not yet a generated draft."""
+    fingerprint = entry.source_fingerprint or ""
+    return fingerprint.startswith(BRIEF_FINGERPRINT_PREFIX)

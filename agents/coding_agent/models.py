@@ -87,6 +87,32 @@ class FixRequest:
 
 
 @dataclass(frozen=True)
+class IntakeFixJob:
+    """Human-approved dashboard intake that should generate a code fix.
+
+    This is not a ``DiagnosisResult``: there is no failed LLM call, and the
+    human approval of the intake ticket is the confidence gate.
+    """
+
+    parent_entry_id: str
+    request: str
+    nodeids: tuple[str, ...]
+    error_output: str = ""
+    source_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class IntakeFixResult:
+    parent_entry_id: str
+    child_entry: Optional[PendingApprovalEntry]
+    success: bool
+    skipped: bool
+    reason: str
+    nodeids: tuple[str, ...] = ()
+    attempts: int = 0
+
+
+@dataclass(frozen=True)
 class FixLoopResult:
     skipped: bool
     diagnosis: DiagnosisResult
