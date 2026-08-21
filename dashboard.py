@@ -4,16 +4,23 @@ Run history is read from ``~/.streamctx/sessions.db`` through StreamCtx's
 existing WAL-mode ``SessionStorage`` connection helpers. Pending-approval
 rows live in the per-agent SQLite files under the same home directory
 (``sessions.db`` has no ``pending_approval`` table).
+
+The Roster tab is a read of that existing SQLite state (plus optional
+writes into coding intake / marketing draft queues). It does not add a
+scheduler or a new task table.
 """
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from streamctx import get_tracker
@@ -21,6 +28,8 @@ from streamctx.storage import get_storage
 
 from agents.coding_agent import coding_agent
 from agents.coding_agent.pending_approval import (
+    DEFAULT_AGENT_DB as CODING_DB,
+    ROOT_CAUSE_INTAKE,
     STATUS_APPROVED as CODING_APPROVED,
     STATUS_AUTO_FIX_FAILED,
     STATUS_NEEDS_HUMAN_REVIEW,
@@ -29,14 +38,21 @@ from agents.coding_agent.pending_approval import (
     PendingApprovalStore as CodingStore,
 )
 from agents.competitor_agent import competitor_agent
+from agents.competitor_agent.storage import DEFAULT_AGENT_DB as COMPETITOR_DB
 from agents.marketing_agent import marketing_agent
 from agents.marketing_agent.pending_approval import (
+    CONTENT_POST,
+    DEFAULT_AGENT_DB as MARKETING_DB,
+    MODE_DRAFT_ONLY,
+    PLATFORM_LINKEDIN,
     STATUS_APPROVED as MARKETING_APPROVED,
     STATUS_PENDING as MARKETING_PENDING,
+    STATUS_PUBLISHED as MARKETING_PUBLISHED,
     STATUS_REJECTED as MARKETING_REJECTED,
     PendingApprovalStore as MarketingStore,
 )
 from agents.research_agent import research_agent
+from agents.research_agent.storage import DEFAULT_AGENT_DB as RESEARCH_DB
 from shared.audit_log import get_pending_actions, update_status as update_audit_status
 from shared.config import AGENT_IDS, STATUS_APPROVED, STATUS_REJECTED
 
@@ -61,6 +77,8 @@ class AgentSpec:
     name: str
     agent_id: str
     run: Callable[[], Any]
+    role: str
+    assign_mode: str  # coding | marketing | none
 
 
 @dataclass
@@ -84,25 +102,85 @@ class PendingItem:
     store: str  # coding | marketing | audit
 
 
+@dataclass(frozen=True)
+class RosterDbPaths:
+    coding: Path = CODING_DB
+    marketing: Path = MARKETING_DB
+    competitor: Path = COMPETITOR_DB
+    research: Path = RESEARCH_DB
+
+
+@dataclass(frozen=True)
+class DomainSnapshot:
+    last_ts: Optional[str] = None
+    last_text: str = ""
+    completed_week: int = 0
+    errors_week: int = 0
+    durable_error: bool = False
+    stale_error: bool = False
+    briefing_line: str = "No new completed work since last session."
+
+
+@dataclass(frozen=True)
+class RosterCard:
+    key: str
+    name: str
+    role: str
+    assign_mode: str
+    status: str
+    last_activity: str
+    completed_week: int
+    pending: int
+    errors_week: int
+    briefing_line: str
+    stale_error: bool
+    error_detail: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MorningBriefing:
+    lines: tuple[str, ...]
+    pending_total: int
+    stuck: tuple[str, ...]
+
+
+ROSTER_IDLE = "Idle"
+ROSTER_WORKING = "Working"
+ROSTER_WAITING = "Waiting for Approval"
+ROSTER_ERROR = "Error"
+
 AGENTS: tuple[AgentSpec, ...] = (
-    AgentSpec("coding", "Coding Agent", AGENT_IDS["coding"], coding_agent.run),
+    AgentSpec(
+        "coding",
+        "Coding Agent",
+        AGENT_IDS["coding"],
+        coding_agent.run,
+        "fixes failing tests",
+        "coding",
+    ),
     AgentSpec(
         "marketing",
         "Marketing Agent",
         AGENT_IDS["marketing"],
         marketing_agent.run,
+        "drafts community posts",
+        "marketing",
     ),
     AgentSpec(
         "competitor",
         "Competitor Agent",
         AGENT_IDS["competitor"],
         competitor_agent.run,
+        "tracks competitor signals",
+        "none",
     ),
     AgentSpec(
         "research",
         "Research Agent",
         AGENT_IDS["research"],
         research_agent.run,
+        "finds papers and features",
+        "none",
     ),
 )
 AGENT_BY_KEY = {spec.key: spec for spec in AGENTS}
@@ -468,6 +546,687 @@ def _status_emoji(status: str) -> str:
     }.get(status, "⚪")
 
 
+def _roster_status_emoji(status: str) -> str:
+    return {
+        ROSTER_IDLE: "⚪",
+        ROSTER_WORKING: "🔵",
+        ROSTER_WAITING: "🟡",
+        ROSTER_ERROR: "🔴",
+    }.get(status, "⚪")
+
+
+def parse_iso(ts: Optional[str | datetime]) -> Optional[datetime]:
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        parsed = ts
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    text = str(ts).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def start_of_utc_day(now: datetime) -> datetime:
+    now = now.astimezone(timezone.utc)
+    return datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+
+
+def week_start_utc(now: datetime) -> datetime:
+    now = now.astimezone(timezone.utc)
+    monday = now - timedelta(days=now.weekday())
+    return datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc)
+
+
+def relative_time(ts: Optional[str | datetime], now: datetime) -> str:
+    parsed = parse_iso(ts)
+    if parsed is None:
+        return "never"
+    seconds = int((now.astimezone(timezone.utc) - parsed).total_seconds())
+    if seconds < 0:
+        seconds = 0
+    if seconds < 45:
+        return "just now"
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    days = seconds // 86400
+    if days < 7:
+        return f"{days}d ago"
+    return f"{days // 7}w ago"
+
+
+def derive_roster_status(
+    *,
+    runtime_status: str,
+    runtime_error: Optional[str],
+    pending: int,
+    durable_error: bool,
+    open_session: bool,
+    session_started_at: Optional[str],
+    now: datetime,
+) -> str:
+    """Idle / Working / Waiting for Approval / Error from existing state."""
+    started = parse_iso(session_started_at)
+    stale_open = bool(
+        open_session and started is not None and started < start_of_utc_day(now)
+    )
+    live_open = bool(open_session and not stale_open)
+    if runtime_status == "running" or live_open:
+        return ROSTER_WORKING
+    if runtime_status == "failed" or runtime_error or durable_error or stale_open:
+        return ROSTER_ERROR
+    if pending > 0:
+        return ROSTER_WAITING
+    return ROSTER_IDLE
+
+
+def _readonly_query(
+    db_path: Optional[Path | str],
+    sql: str,
+    params: tuple = (),
+) -> list[dict[str, Any]]:
+    if db_path is None:
+        return []
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def _count_sql(db_path: Optional[Path | str], sql: str, params: tuple = ()) -> int:
+    rows = _readonly_query(db_path, sql, params)
+    if not rows:
+        return 0
+    return int(next(iter(rows[0].values())))
+
+
+def _join_phrases(parts: list[str], empty: str) -> str:
+    if not parts:
+        return empty
+    if len(parts) == 1:
+        return parts[0][0].upper() + parts[0][1:] + "."
+    return parts[0][0].upper() + parts[0][1:] + ", " + ", ".join(parts[1:]) + "."
+
+
+def _coding_activity_text(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "")
+    root = str(row.get("root_cause") or "")
+    if root == ROOT_CAUSE_INTAKE:
+        return "queued an assigned task"
+    if status == STATUS_AUTO_FIX_FAILED:
+        return "auto-fix failed"
+    if status == STATUS_READY_FOR_APPROVAL:
+        return "queued a fix for approval"
+    if status == CODING_APPROVED:
+        return "approved a fix"
+    if status == CODING_REJECTED:
+        return "rejected a fix"
+    if status == STATUS_NEEDS_HUMAN_REVIEW:
+        return f"flagged {root or 'an issue'} for review"
+    return f"updated a {status or 'queue'} item"
+
+
+def load_coding_domain(
+    db_path: Optional[Path | str],
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    latest = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, root_cause
+        FROM pending_approval
+        ORDER BY created_at DESC, entry_id DESC
+        LIMIT 1
+        """,
+    )
+    last_ts = str(latest[0]["created_at"]) if latest else None
+    last_text = _coding_activity_text(latest[0]) if latest else ""
+    completed_week = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (CODING_APPROVED, week_iso),
+    )
+    errors_week = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (STATUS_AUTO_FIX_FAILED, week_iso),
+    )
+    durable_error = (
+        _count_sql(
+            db_path,
+            "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ?",
+            (STATUS_AUTO_FIX_FAILED,),
+        )
+        > 0
+    )
+    stale_error = (
+        _count_sql(
+            db_path,
+            "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at < ?",
+            (STATUS_AUTO_FIX_FAILED, today_iso),
+        )
+        > 0
+    )
+    approved = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (CODING_APPROVED, since_iso),
+    )
+    ready = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (STATUS_READY_FOR_APPROVAL, since_iso),
+    )
+    parts: list[str] = []
+    if approved:
+        parts.append(f"approved {approved} fix" + ("es" if approved != 1 else ""))
+    if ready:
+        parts.append(
+            f"queued {ready} fix" + ("es" if ready != 1 else "") + " for approval"
+        )
+    return DomainSnapshot(
+        last_ts=last_ts,
+        last_text=last_text,
+        completed_week=completed_week,
+        errors_week=errors_week,
+        durable_error=durable_error,
+        stale_error=stale_error,
+        briefing_line=_join_phrases(
+            parts, "No new completed work since last session."
+        ),
+    )
+
+
+def load_marketing_domain(
+    db_path: Optional[Path | str],
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    del now, today_iso
+    latest = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, platform, content_type
+        FROM pending_approval
+        ORDER BY created_at DESC, entry_id DESC
+        LIMIT 1
+        """,
+    )
+    last_ts = str(latest[0]["created_at"]) if latest else None
+    last_text = ""
+    if latest:
+        row = latest[0]
+        platform = str(row.get("platform") or "draft")
+        content_type = str(row.get("content_type") or "post")
+        status = str(row.get("status") or "")
+        if status == MARKETING_PUBLISHED:
+            last_text = f"published a {platform} {content_type}"
+        elif status == MARKETING_APPROVED:
+            last_text = f"approved a {platform} {content_type}"
+        else:
+            last_text = f"queued a {platform} {content_type}"
+    completed_week = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE (status = ? AND COALESCE(published_at, created_at) >= ?)
+           OR (status = ? AND created_at >= ?)
+        """,
+        (MARKETING_PUBLISHED, week_iso, MARKETING_APPROVED, week_iso),
+    )
+    published = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ? AND COALESCE(published_at, created_at) >= ?
+        """,
+        (MARKETING_PUBLISHED, since_iso),
+    )
+    approved = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (MARKETING_APPROVED, since_iso),
+    )
+    queued = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (MARKETING_PENDING, since_iso),
+    )
+    parts: list[str] = []
+    if published:
+        parts.append(f"published {published} draft" + ("s" if published != 1 else ""))
+    if approved:
+        parts.append(f"approved {approved} draft" + ("s" if approved != 1 else ""))
+    if queued and not published and not approved:
+        parts.append(f"queued {queued} draft" + ("s" if queued != 1 else ""))
+    return DomainSnapshot(
+        last_ts=last_ts,
+        last_text=last_text,
+        completed_week=completed_week,
+        briefing_line=_join_phrases(
+            parts, "No new completed work since last session."
+        ),
+    )
+
+
+def load_competitor_domain(
+    db_path: Optional[Path | str],
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    del now, today_iso
+    snapshots = _readonly_query(
+        db_path,
+        """
+        SELECT competitor, snapshot_type, captured_at AS ts
+        FROM competitor_snapshots
+        ORDER BY captured_at DESC, rowid DESC
+        LIMIT 1
+        """,
+    )
+    signals = _readonly_query(
+        db_path,
+        """
+        SELECT competitor, signal_type, summary, detected_at AS ts
+        FROM competitor_signals
+        ORDER BY detected_at DESC, signal_id DESC
+        LIMIT 1
+        """,
+    )
+    reports = _readonly_query(
+        db_path,
+        """
+        SELECT created_at AS ts FROM weekly_reports
+        ORDER BY created_at DESC, report_id DESC
+        LIMIT 1
+        """,
+    )
+    candidates: list[tuple[datetime, str, str]] = []
+    if snapshots:
+        row = snapshots[0]
+        parsed = parse_iso(row.get("ts"))
+        if parsed is not None:
+            candidates.append(
+                (
+                    parsed,
+                    str(row["ts"]),
+                    f"captured a {row['snapshot_type']} snapshot for {row['competitor']}",
+                )
+            )
+    if signals:
+        row = signals[0]
+        parsed = parse_iso(row.get("ts"))
+        if parsed is not None:
+            candidates.append(
+                (
+                    parsed,
+                    str(row["ts"]),
+                    f"detected {row['signal_type']} for {row['competitor']}",
+                )
+            )
+    if reports:
+        row = reports[0]
+        parsed = parse_iso(row.get("ts"))
+        if parsed is not None:
+            candidates.append((parsed, str(row["ts"]), "wrote a weekly report"))
+    last_ts = None
+    last_text = ""
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _, last_ts, last_text = candidates[0]
+    n_signals_week = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM competitor_signals WHERE detected_at >= ?",
+        (week_iso,),
+    )
+    n_reports_week = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM weekly_reports WHERE created_at >= ?",
+        (week_iso,),
+    )
+    n_signals_since = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM competitor_signals WHERE detected_at >= ?",
+        (since_iso,),
+    )
+    n_snaps_since = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM competitor_snapshots WHERE captured_at >= ?",
+        (since_iso,),
+    )
+    n_reports_since = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM weekly_reports WHERE created_at >= ?",
+        (since_iso,),
+    )
+    parts: list[str] = []
+    if n_signals_since:
+        parts.append(
+            f"found {n_signals_since} signal" + ("s" if n_signals_since != 1 else "")
+        )
+    if n_snaps_since and not n_signals_since:
+        parts.append(
+            f"captured {n_snaps_since} snapshot"
+            + ("s" if n_snaps_since != 1 else "")
+        )
+    if n_reports_since:
+        parts.append(
+            f"wrote {n_reports_since} weekly report"
+            + ("s" if n_reports_since != 1 else "")
+        )
+    return DomainSnapshot(
+        last_ts=last_ts,
+        last_text=last_text,
+        completed_week=n_signals_week + n_reports_week,
+        briefing_line=_join_phrases(
+            parts, "No new completed work since last session."
+        ),
+    )
+
+
+def load_research_domain(
+    db_path: Optional[Path | str],
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    del now, today_iso
+    latest_idea = _readonly_query(
+        db_path,
+        """
+        SELECT detected_at, title, status
+        FROM research_ideas
+        ORDER BY detected_at DESC, idea_id DESC
+        LIMIT 1
+        """,
+    )
+    latest_poll = _readonly_query(
+        db_path,
+        """
+        SELECT source_type, last_polled_at
+        FROM research_poll_state
+        ORDER BY last_polled_at DESC
+        LIMIT 1
+        """,
+    )
+    candidates: list[tuple[datetime, str, str]] = []
+    if latest_idea:
+        row = latest_idea[0]
+        parsed = parse_iso(row.get("detected_at"))
+        if parsed is not None:
+            title = _clip(str(row.get("title") or "idea"), 72)
+            candidates.append(
+                (parsed, str(row["detected_at"]), f'logged "{title}"')
+            )
+    if latest_poll:
+        row = latest_poll[0]
+        parsed = parse_iso(row.get("last_polled_at"))
+        if parsed is not None:
+            candidates.append(
+                (
+                    parsed,
+                    str(row["last_polled_at"]),
+                    f"polled {row['source_type']}",
+                )
+            )
+    last_ts = None
+    last_text = ""
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _, last_ts, last_text = candidates[0]
+    completed_week = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM research_ideas
+        WHERE status IN ('reviewed', 'prototyped') AND detected_at >= ?
+        """,
+        (week_iso,),
+    )
+    n_logged = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM research_ideas WHERE detected_at >= ?",
+        (since_iso,),
+    )
+    n_reviewed = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM research_ideas
+        WHERE status IN ('reviewed', 'prototyped') AND detected_at >= ?
+        """,
+        (since_iso,),
+    )
+    parts: list[str] = []
+    if n_logged:
+        parts.append(f"logged {n_logged} idea" + ("s" if n_logged != 1 else ""))
+    if n_reviewed:
+        parts.append(
+            f"reviewed {n_reviewed}" + (" of them" if n_logged else " idea(s)")
+        )
+    return DomainSnapshot(
+        last_ts=last_ts,
+        last_text=last_text,
+        completed_week=completed_week,
+        briefing_line=_join_phrases(
+            parts, "No new completed work since last session."
+        ),
+    )
+
+
+def _domain_for_agent(
+    spec: AgentSpec,
+    paths: RosterDbPaths,
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    loaders = {
+        "coding": (load_coding_domain, paths.coding),
+        "marketing": (load_marketing_domain, paths.marketing),
+        "competitor": (load_competitor_domain, paths.competitor),
+        "research": (load_research_domain, paths.research),
+    }
+    loader, db_path = loaders[spec.key]
+    return loader(
+        db_path,
+        now=now,
+        since_iso=since_iso,
+        week_iso=week_iso,
+        today_iso=today_iso,
+    )
+
+
+def _briefing_cutoff_iso(
+    session: Optional[dict[str, Any]],
+    now: datetime,
+) -> str:
+    today = start_of_utc_day(now)
+    if session is None:
+        return today.isoformat()
+    started = parse_iso(session.get("started_at"))
+    if started is None:
+        return today.isoformat()
+    return started.isoformat()
+
+
+def _format_last_activity(
+    domain: DomainSnapshot,
+    now: datetime,
+) -> str:
+    if domain.last_ts and domain.last_text:
+        return f"{relative_time(domain.last_ts, now)}: {domain.last_text}"
+    return "No activity recorded yet"
+
+
+def load_roster_cards(
+    *,
+    now: Optional[datetime] = None,
+    paths: Optional[RosterDbPaths] = None,
+    pending: Optional[dict[str, int]] = None,
+    sessions: Optional[dict[str, Optional[dict[str, Any]]]] = None,
+    runtimes: Optional[dict[str, RuntimeState]] = None,
+) -> list[RosterCard]:
+    now = now or datetime.now(timezone.utc)
+    paths = paths or RosterDbPaths()
+    counts = pending if pending is not None else pending_counts()
+    week_iso = week_start_utc(now).isoformat()
+    today_iso = start_of_utc_day(now).isoformat()
+    cards: list[RosterCard] = []
+    for spec in AGENTS:
+        if runtimes is not None:
+            runtime = runtimes.get(spec.key) or RuntimeState()
+        else:
+            with _LOCK:
+                runtime = RuntimeState(
+                    status=_RUNTIME[spec.key].status,
+                    last_run=_RUNTIME[spec.key].last_run,
+                    error=_RUNTIME[spec.key].error,
+                    session_id=_RUNTIME[spec.key].session_id,
+                    summary=_RUNTIME[spec.key].summary,
+                )
+        if sessions is not None:
+            session = sessions.get(spec.key)
+        else:
+            try:
+                session = latest_session_for_agent(spec.agent_id)
+            except Exception:
+                session = None
+        since_iso = _briefing_cutoff_iso(session, now)
+        domain = _domain_for_agent(
+            spec,
+            paths,
+            now=now,
+            since_iso=since_iso,
+            week_iso=week_iso,
+            today_iso=today_iso,
+        )
+        pending_n = counts.get(spec.key, 0)
+        open_session = bool(session and not session.get("ended_at"))
+        started_at = str(session["started_at"]) if session and session.get("started_at") else None
+        status = derive_roster_status(
+            runtime_status=runtime.status,
+            runtime_error=runtime.error,
+            pending=pending_n,
+            durable_error=domain.durable_error,
+            open_session=open_session,
+            session_started_at=started_at,
+            now=now,
+        )
+        stale_error = domain.stale_error
+        if open_session and started_at and parse_iso(started_at) is not None:
+            if parse_iso(started_at) < start_of_utc_day(now):
+                stale_error = True
+        if runtime.status == "failed" and runtime.last_run:
+            last_fail = parse_iso(runtime.last_run)
+            if last_fail is not None and last_fail < start_of_utc_day(now):
+                stale_error = True
+        cards.append(
+            RosterCard(
+                key=spec.key,
+                name=spec.name,
+                role=spec.role,
+                assign_mode=spec.assign_mode,
+                status=status,
+                last_activity=_format_last_activity(domain, now),
+                completed_week=domain.completed_week,
+                pending=pending_n,
+                errors_week=domain.errors_week,
+                briefing_line=domain.briefing_line,
+                stale_error=stale_error,
+                error_detail=runtime.error,
+            )
+        )
+    return cards
+
+
+def build_morning_briefing(
+    cards: list[RosterCard],
+    pending_total: Optional[int] = None,
+) -> MorningBriefing:
+    total = pending_total if pending_total is not None else sum(card.pending for card in cards)
+    return MorningBriefing(
+        lines=tuple(f"{card.name}: {card.briefing_line}" for card in cards),
+        pending_total=total,
+        stuck=tuple(card.name for card in cards if card.stale_error),
+    )
+
+
+def assign_coding_task(
+    text: str,
+    *,
+    db_path: Optional[Path | str] = None,
+) -> str:
+    body = (text or "").strip()
+    if not body:
+        raise ValueError("task is empty")
+    summary = body.splitlines()[0][:80]
+    store = CodingStore(db_path=db_path, enable_default_notifier=False)
+    try:
+        entry = store.create_intake_task(
+            task_ref=f"dashboard:{uuid.uuid4()}",
+            summary=summary,
+            request=body,
+            payload={"source": "dashboard_roster"},
+        )
+        return entry.entry_id
+    finally:
+        store.close()
+
+
+def assign_marketing_task(
+    text: str,
+    *,
+    db_path: Optional[Path | str] = None,
+) -> str:
+    body = (text or "").strip()
+    if not body:
+        raise ValueError("task is empty")
+    store = MarketingStore(db_path=db_path, enable_default_notifier=False)
+    try:
+        entry = store.create_entry(
+            platform=PLATFORM_LINKEDIN,
+            content_type=CONTENT_POST,
+            content=body,
+            mode=MODE_DRAFT_ONLY,
+        )
+        return entry.entry_id
+    finally:
+        store.close()
+
+
 def _in_streamlit() -> bool:
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx
@@ -477,35 +1236,74 @@ def _in_streamlit() -> bool:
         return False
 
 
-def render() -> None:
-    import streamlit as st
+def _render_roster_card(st: Any, card: RosterCard) -> None:
+    with st.container(border=True):
+        st.subheader(card.name)
+        st.caption(card.role)
+        st.markdown(f"{_roster_status_emoji(card.status)} **{card.status}**")
+        st.caption(card.last_activity)
+        metrics = st.columns(3)
+        metrics[0].metric("Completed (week)", card.completed_week)
+        metrics[1].metric("Pending", card.pending)
+        metrics[2].metric("Errors (week)", card.errors_week)
+        if card.status == ROSTER_ERROR and card.error_detail:
+            st.error(card.error_detail.splitlines()[0])
+        if card.assign_mode == "none":
+            st.text_input(
+                "Assign a task",
+                value="",
+                disabled=True,
+                key=f"assign-disabled-{card.key}",
+            )
+            st.caption("No task queue yet — this agent runs autonomously")
+            return
+        with st.form(key=f"assign-form-{card.key}", clear_on_submit=True):
+            text = st.text_input("Assign a task")
+            submitted = st.form_submit_button("Assign")
+            if submitted:
+                body = (text or "").strip()
+                if not body:
+                    st.warning("Enter a task first.")
+                else:
+                    try:
+                        if card.assign_mode == "coding":
+                            assign_coding_task(body)
+                            st.success("Queued as coding intake.")
+                        elif card.assign_mode == "marketing":
+                            assign_marketing_task(body)
+                            st.success("Queued as a LinkedIn draft.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
-    st.set_page_config(
-        page_title="StreamCtx Agent Control Center",
-        layout="wide",
-        page_icon="🎛️",
-    )
-    st.title("StreamCtx Agent Control Center")
-    st.caption(
-        "Run history from `~/.streamctx/sessions.db` (StreamCtx WAL storage). "
-        "Pending approvals from the per-agent SQLite queues."
-    )
 
-    top = st.columns([1, 1, 2])
-    with top[0]:
-        if st.button("Run All", type="primary", use_container_width=True):
-            submit_all_agents()
-            st.rerun()
-    with top[1]:
-        if st.button("Refresh", use_container_width=True):
-            st.rerun()
-    with top[2]:
-        auto = st.checkbox(
-            f"Auto-refresh every {REFRESH_SECONDS}s",
-            value=False,
-            key="auto_refresh",
-        )
+def _render_roster_tab(st: Any, cards: list[RosterCard], briefing: MorningBriefing) -> None:
+    st.header("Morning Briefing")
+    with st.container(border=True):
+        for line in briefing.lines:
+            st.markdown(f"- {line}")
+        if briefing.pending_total:
+            noun = "approval" if briefing.pending_total == 1 else "approvals"
+            st.markdown(
+                f"**{briefing.pending_total} pending {noun}** across all agents — "
+                "open the **Control** tab to review the feed."
+            )
+        else:
+            st.markdown("No pending approvals.")
+        if briefing.stuck:
+            st.error("Stuck/erroring since before today: " + ", ".join(briefing.stuck))
+        else:
+            st.caption("No agent has been stuck or erroring since before today.")
 
+    st.header("Team Roster")
+    for pair in (cards[0:2], cards[2:4]):
+        columns = st.columns(2)
+        for column, card in zip(columns, pair):
+            with column:
+                _render_roster_card(st, card)
+
+
+def _render_control_tab(st: Any) -> None:
     cards = load_agent_statuses()
     columns = st.columns(4)
     for column, card in zip(columns, cards):
@@ -545,6 +1343,44 @@ def render() -> None:
                 if st.button("Reject", key=f"reject-{item.store}-{item.entry_id}"):
                     reject_entry(item)
                     st.rerun()
+
+
+def render() -> None:
+    import streamlit as st
+
+    st.set_page_config(
+        page_title="StreamCtx Agent Control Center",
+        layout="wide",
+        page_icon="🎛️",
+    )
+    st.title("StreamCtx Agent Control Center")
+    st.caption(
+        "Run history from `~/.streamctx/sessions.db` (StreamCtx WAL storage). "
+        "Pending approvals from the per-agent SQLite queues."
+    )
+
+    top = st.columns([1, 1, 2])
+    with top[0]:
+        if st.button("Run All", type="primary", use_container_width=True):
+            submit_all_agents()
+            st.rerun()
+    with top[1]:
+        if st.button("Refresh", use_container_width=True):
+            st.rerun()
+    with top[2]:
+        auto = st.checkbox(
+            f"Auto-refresh every {REFRESH_SECONDS}s",
+            value=False,
+            key="auto_refresh",
+        )
+
+    roster_cards = load_roster_cards()
+    briefing = build_morning_briefing(roster_cards)
+    tab_roster, tab_control = st.tabs(["Roster", "Control"])
+    with tab_roster:
+        _render_roster_tab(st, roster_cards, briefing)
+    with tab_control:
+        _render_control_tab(st)
 
     if auto or any_agent_running():
         time.sleep(REFRESH_SECONDS)
