@@ -181,6 +181,58 @@ def cmd_handoff(args: argparse.Namespace) -> int:
         tracker.stop()
 
 
+def run(
+    *,
+    db: str | None = None,
+    coding_db: str | None = None,
+    limit: int | None = None,
+    notify: bool = True,
+) -> dict:
+    """Run poll → hype-filter → gap-map → digest → classify → handoff.
+
+    Stage failures are recorded and later stages still run so a missing
+    API key on classify does not undo a successful poll. Raises only if
+    every stage failed.
+    """
+    store = ResearchStore(db_path=db)
+    summary: dict = {}
+    errors: list[tuple[str, str]] = []
+    stages = (
+        ("poll", lambda: run_poll(store)),
+        ("hype-filter", lambda: run_hype_filter(store, limit=limit)),
+        ("gap-map", lambda: run_gap_map(store, limit=limit)),
+        ("digest", lambda: run_digest(store, notify=notify)),
+        ("classify", lambda: run_classify(store, limit=limit)),
+        (
+            "handoff",
+            lambda: run_handoff(
+                store,
+                coding_db=coding_db,
+                notify=notify,
+                limit=limit,
+            ),
+        ),
+    )
+    try:
+        for name, fn in stages:
+            try:
+                result = fn()
+                summary[name] = result
+                print(f"[research-agent] {name} ok")
+            except Exception as exc:
+                errors.append((name, str(exc)))
+                summary[name] = None
+                print(f"[research-agent] {name} failed: {exc}", file=sys.stderr)
+        if errors and all(summary.get(name) is None for name, _ in stages):
+            joined = "; ".join(f"{name}: {message}" for name, message in errors)
+            raise RuntimeError(f"research-agent: all stages failed: {joined}")
+        if errors:
+            summary["stage_errors"] = errors
+        return summary
+    finally:
+        store.close()
+
+
 def _add_db_limit(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db",
