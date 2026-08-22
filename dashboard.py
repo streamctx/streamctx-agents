@@ -167,6 +167,7 @@ ROSTER_IDLE = "Idle"
 ROSTER_WORKING = "Working"
 ROSTER_WAITING = "Waiting for Approval"
 ROSTER_ERROR = "Error"
+ASSIGN_DISABLED_CAPTION = "No task queue yet — this agent runs autonomously"
 
 AGENTS: tuple[AgentSpec, ...] = (
     AgentSpec(
@@ -1658,7 +1659,7 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
                 disabled=True,
                 key=f"assign-disabled-{card.key}",
             )
-            st.caption("No task queue yet — this agent runs autonomously")
+            st.caption(ASSIGN_DISABLED_CAPTION)
             return
         with st.form(key=f"assign-form-{card.key}", clear_on_submit=True):
             text = st.text_input("Assign a task")

@@ -35,6 +35,7 @@ from dashboard import (
     RosterDbPaths,
     RuntimeState,
     approve_entry,
+    ASSIGN_DISABLED_CAPTION,
     assign_coding_task,
     assign_competitor_task,
     assign_marketing_task,
@@ -614,6 +615,9 @@ def test_load_roster_cards_waiting_and_briefing(paths):
     assert by_key["coding"].assign_mode == "coding"
     assert by_key["competitor"].assign_mode == "competitor"
     assert by_key["research"].assign_mode == "none"
+    assert ASSIGN_DISABLED_CAPTION == (
+        "No task queue yet — this agent runs autonomously"
+    )
     assert by_key["marketing"].assign_mode == "marketing"
     assert "flagged UNCLEAR for review" in by_key["coding"].last_activity
     assert by_key["coding"].briefing_line.startswith("Quiet since")
