@@ -36,6 +36,7 @@ from dashboard import (
     RuntimeState,
     approve_entry,
     assign_coding_task,
+    assign_competitor_task,
     assign_marketing_task,
     begin_dashboard_visit,
     build_morning_briefing,
@@ -162,6 +163,40 @@ def test_assign_marketing_task_queues_linkedin_draft_only(paths):
         assert (entry.source_fingerprint or "").startswith(BRIEF_FINGERPRINT_PREFIX)
     finally:
         store.close()
+
+
+def test_assign_competitor_task_kicks_off_directed_check(paths, tmp_path, monkeypatch):
+    config = tmp_path / "competitors.json"
+    config.write_text(
+        '{"competitors":[{"name":"LangSmith","pricing_url":"https://example.test/p"}]}',
+        encoding="utf-8",
+    )
+    called: dict[str, object] = {}
+
+    def fake_submit(text, *, db_path=None, config_path=None):
+        called["text"] = text
+        called["db_path"] = db_path
+        called["config_path"] = config_path
+
+    monkeypatch.setattr("dashboard.submit_competitor_check", fake_submit)
+    label = assign_competitor_task(
+        "check if LangSmith changed their pricing page",
+        db_path=paths.competitor,
+        config_path=config,
+    )
+    assert label == "LangSmith pricing"
+    assert called["text"] == "check if LangSmith changed their pricing page"
+    assert called["db_path"] == paths.competitor
+
+
+def test_assign_competitor_task_rejects_unknown(tmp_path):
+    config = tmp_path / "competitors.json"
+    config.write_text(
+        '{"competitors":[{"name":"LangSmith","pricing_url":"https://example.test/p"}]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unknown competitor"):
+        assign_competitor_task("check CompetitorX pricing", config_path=config)
 
 
 def test_coding_domain_activity_and_week_stats(paths):
@@ -577,7 +612,7 @@ def test_load_roster_cards_waiting_and_briefing(paths):
     assert by_key["coding"].new_pending == 0
     assert by_key["coding"].role == "fixes failing tests"
     assert by_key["coding"].assign_mode == "coding"
-    assert by_key["competitor"].assign_mode == "none"
+    assert by_key["competitor"].assign_mode == "competitor"
     assert by_key["research"].assign_mode == "none"
     assert by_key["marketing"].assign_mode == "marketing"
     assert "flagged UNCLEAR for review" in by_key["coding"].last_activity

@@ -187,6 +187,7 @@ def poll_pricing(
     fetch_fn: Optional[FetchFn] = None,
     sleep_fn: Optional[SleepFn] = None,
     now_fn: Optional[NowFn] = None,
+    min_interval_seconds: Optional[int] = None,
 ) -> Optional[CompetitorSignal]:
     if not competitor.pricing_url:
         return None
@@ -219,7 +220,11 @@ def poll_pricing(
         store=store,
         summarize_fn=_summarize,
         source_url=competitor.pricing_url,
-        min_interval_seconds=config.pricing_min_interval_seconds,
+        min_interval_seconds=(
+            config.pricing_min_interval_seconds
+            if min_interval_seconds is None
+            else min_interval_seconds
+        ),
         now_fn=now_fn,
     )
 
@@ -233,6 +238,7 @@ def poll_github_releases(
     sleep_fn: Optional[SleepFn] = None,
     now_fn: Optional[NowFn] = None,
     token: Optional[str] = None,
+    min_interval_seconds: Optional[int] = None,
 ) -> list[CompetitorSignal]:
     """Poll GitHub releases and emit one ``new_release`` signal per new tag."""
     if not competitor.github_repo:
@@ -260,7 +266,11 @@ def poll_github_releases(
         SNAPSHOT_TYPE_GITHUB_RELEASE,
         fetch_fn or _fetch,
         store=store,
-        min_interval_seconds=config.github_min_interval_seconds,
+        min_interval_seconds=(
+            config.github_min_interval_seconds
+            if min_interval_seconds is None
+            else min_interval_seconds
+        ),
         now_fn=now_fn,
     )
     if skipped or current is None or previous is None:
@@ -293,6 +303,7 @@ def poll_rss(
     fetch_fn: Optional[FetchFn] = None,
     sleep_fn: Optional[SleepFn] = None,
     now_fn: Optional[NowFn] = None,
+    min_interval_seconds: Optional[int] = None,
 ) -> list[CompetitorSignal]:
     """Poll an RSS/Atom feed and emit one ``new_post`` signal per new entry."""
     if not competitor.rss_url:
@@ -314,7 +325,11 @@ def poll_rss(
         SNAPSHOT_TYPE_CHANGELOG,
         fetch_fn or _fetch,
         store=store,
-        min_interval_seconds=config.rss_min_interval_seconds,
+        min_interval_seconds=(
+            config.rss_min_interval_seconds
+            if min_interval_seconds is None
+            else min_interval_seconds
+        ),
         now_fn=now_fn,
     )
     if skipped or current is None or previous is None:

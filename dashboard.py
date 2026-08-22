@@ -151,6 +151,7 @@ class RosterCard:
     briefing_line: str
     stale_error: bool
     error_detail: Optional[str] = None
+    last_check: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -190,7 +191,7 @@ AGENTS: tuple[AgentSpec, ...] = (
         AGENT_IDS["competitor"],
         competitor_agent.run,
         "tracks competitor signals",
-        "none",
+        "competitor",
     ),
     AgentSpec(
         "research",
@@ -615,6 +616,57 @@ def _execute_draft_job(
             _RUNTIME["marketing"].error = f"{exc}\n{traceback.format_exc()}"
             _RUNTIME["marketing"].summary = str(exc)
         raise
+
+
+def submit_competitor_check(
+    text: str,
+    *,
+    db_path: Optional[Path | str] = None,
+    config_path: Optional[Path | str] = None,
+) -> None:
+    """Force one directed snapshot check after Roster Assign."""
+    key = f"competitor-check:{text[:80]}"
+    with _LOCK:
+        future = _FUTURES.get(key)
+        if future is not None and not future.done():
+            return
+        state = _RUNTIME["competitor"]
+        state.status = "running"
+        state.error = None
+        state.summary = "checking assigned competitor…"
+        _FUTURES[key] = _EXECUTOR.submit(
+            _execute_competitor_check, text, db_path, config_path
+        )
+
+
+def _execute_competitor_check(
+    text: str,
+    db_path: Optional[Path | str],
+    config_path: Optional[Path | str],
+) -> Any:
+    from agents.competitor_agent.assign_check import run_directed_check
+    from agents.competitor_agent.settings import CompetitorConfig
+    from agents.competitor_agent.storage import CompetitorStore
+
+    store = CompetitorStore(db_path=db_path)
+    try:
+        spec = CompetitorConfig.load(config_path) if config_path else CompetitorConfig.load()
+        result = run_directed_check(text, store=store, config=spec)
+        with _LOCK:
+            _RUNTIME["competitor"].status = "completed" if result.ok else "failed"
+            _RUNTIME["competitor"].last_run = _now_iso()
+            _RUNTIME["competitor"].error = None if result.ok else result.message
+            _RUNTIME["competitor"].summary = result.message
+        return result
+    except Exception as exc:
+        with _LOCK:
+            _RUNTIME["competitor"].status = "failed"
+            _RUNTIME["competitor"].last_run = _now_iso()
+            _RUNTIME["competitor"].error = f"{exc}\n{traceback.format_exc()}"
+            _RUNTIME["competitor"].summary = str(exc)
+        raise
+    finally:
+        store.close()
 
 
 def any_agent_running() -> bool:
@@ -1499,6 +1551,7 @@ def load_roster_cards(
                 briefing_line=compose_briefing_line(domain, now),
                 stale_error=stale_error,
                 error_detail=runtime.error,
+                last_check=runtime.summary,
             )
         )
     return cards
@@ -1558,6 +1611,21 @@ def assign_marketing_task(
         store.close()
 
 
+def assign_competitor_task(
+    text: str,
+    *,
+    db_path: Optional[Path | str] = None,
+    config_path: Optional[Path | str] = None,
+) -> str:
+    from agents.competitor_agent.assign_check import parse_directed_brief
+    from agents.competitor_agent.settings import CompetitorConfig
+
+    spec = CompetitorConfig.load(config_path) if config_path else CompetitorConfig.load()
+    parsed = parse_directed_brief(text, spec)
+    submit_competitor_check(text, db_path=db_path, config_path=config_path)
+    return f"{parsed.competitor.name} {parsed.kind}"
+
+
 def _in_streamlit() -> bool:
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx
@@ -1581,6 +1649,8 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
         metrics[2].metric("Errors (week)", card.errors_week)
         if card.status == ROSTER_ERROR and card.error_detail:
             st.error(card.error_detail.splitlines()[0])
+        if card.last_check:
+            st.caption(card.last_check)
         if card.assign_mode == "none":
             st.text_input(
                 "Assign a task",
@@ -1605,6 +1675,9 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
                         elif card.assign_mode == "marketing":
                             assign_marketing_task(body)
                             st.success("Queued as a LinkedIn brief.")
+                        elif card.assign_mode == "competitor":
+                            label = assign_competitor_task(body)
+                            st.success(f"Checking {label}…")
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
