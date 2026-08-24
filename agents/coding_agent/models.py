@@ -57,6 +57,9 @@ class PendingApprovalEntry:
     status: str
     created_at: str
     applied_commit: Optional[str] = None
+    generation_mode: str = "api"
+    auto_applied: bool = False
+    verification_mode: str = "pending"
 
 
 @dataclass(frozen=True)
@@ -67,10 +70,37 @@ class GateResult:
 
 
 @dataclass(frozen=True)
+class FixCandidate:
+    """A proposed code snippet, from OpenRouter or local fallback heuristics."""
+
+    candidate_code: str
+    confidence: float
+    reason: str
+    attestation: str
+    error_type: str
+    failed_call_id: str
+    generation_mode: str = "api"
+
+
+@dataclass(frozen=True)
+class DiagnoseProposeResult:
+    diagnosis: DiagnosisResult
+    candidates: list[FixCandidate]
+    generation_mode: str
+    audit_entry: dict[str, Any]
+    auto_apply: bool = False
+    auto_applied: bool = False
+    dry_run_passed: bool = False
+    verification_mode: str = "pending"
+    pending_entry: Optional[PendingApprovalEntry] = None
+
+
+@dataclass(frozen=True)
 class FixProposal:
     diff: str
     regression_test: str
     regression_test_path: str
+    generation_mode: str = "api"
 
 
 @dataclass
@@ -122,6 +152,19 @@ class FixLoopResult:
 
 
 @dataclass(frozen=True)
+class AssignFixResult:
+    """Outcome of a dashboard Assign that contained pytest nodeids."""
+
+    nodeids: tuple[str, ...]
+    failed_call_id: Optional[int]
+    pending_entry: Optional[PendingApprovalEntry]
+    gate: Optional[GateResult]
+    fix: Optional[FixLoopResult]
+    skipped: bool
+    reason: str
+
+
+@dataclass(frozen=True)
 class PipelineItemResult:
     gate: GateResult
     fix: FixLoopResult
@@ -156,3 +199,31 @@ class PipelineRunResult:
             if item.fix.pending_entry is not None
             and item.fix.pending_entry.status == "auto_fix_failed"
         )
+
+
+@dataclass
+class ArchitectureSpec:
+    """Feature architecture produced by SeniorEngineer mode."""
+
+    feature_name: str
+    description: str
+    files_to_create: list[str]
+    files_to_modify: list[str]
+    classes: dict[str, str]
+    methods: dict[str, str]
+    tests_needed: list[str]
+    integration_steps: list[str]
+
+
+@dataclass
+class CodePackage:
+    """Complete feature package ready for human review and merge."""
+
+    feature_name: str
+    files: dict[str, str]
+    tests: dict[str, str]
+    integration_md: str
+    status: str  # ready | needs_review | blocked | approved | rejected
+    original_prompt: str = ""
+    created_at: str = ""
+    architecture: dict[str, Any] = field(default_factory=dict)

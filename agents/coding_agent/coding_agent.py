@@ -4,6 +4,7 @@ Coding Agent CLI — runs the full six-stage pipeline or human follow-up actions
 Usage::
 
     python -m agents.coding_agent.coding_agent run [--limit N]
+    python -m agents.coding_agent.coding_agent feature "Add rate limiting"
     python -m agents.coding_agent.coding_agent approve <entry_id> [--commit SHA]
     python -m agents.coding_agent.coding_agent reject <entry_id> --reason "..."
     python -m agents.coding_agent.coding_agent revert <entry_id>
@@ -18,6 +19,7 @@ from streamctx import get_tracker
 
 from agents.coding_agent.pipeline import CodingAgentPipeline
 from agents.coding_agent.models import PipelineRunResult
+from agents.coding_agent.senior_engineer_mode import run_feature
 from shared.config import AGENT_IDS, BASE_DIR
 
 
@@ -95,6 +97,27 @@ def cmd_revert(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_feature(args: argparse.Namespace) -> int:
+    tracker = get_tracker(AGENT_IDS["coding"])
+    tracker.start()
+    try:
+        package, dest = run_feature(args.request, output_dir=args.output)
+    finally:
+        tracker.stop()
+
+    print(
+        f"[coding-agent] feature={package.feature_name} "
+        f"status={package.status} wrote={dest}"
+    )
+    for name in package.files:
+        print(f"  file {name}")
+    for name in package.tests:
+        print(f"  test {name}")
+    if package.integration_md.strip():
+        print("  guide INTEGRATION.md")
+    return 0 if package.status != "blocked" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="StreamCtx coding agent — autonomous detect, diagnose, fix, review.",
@@ -138,6 +161,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Git repo root (defaults to --source-root)",
     )
     revert_parser.set_defaults(func=cmd_revert)
+
+    feature_parser = subparsers.add_parser(
+        "feature",
+        help="Generate a complete feature package from a description",
+    )
+    feature_parser.add_argument(
+        "request",
+        help="Feature description (one or more sentences)",
+    )
+    feature_parser.add_argument(
+        "--output",
+        default=None,
+        help="Directory to write the package (default: generated_features/<name>/)",
+    )
+    feature_parser.set_defaults(func=cmd_feature)
 
     args = parser.parse_args(argv)
     return args.func(args)
