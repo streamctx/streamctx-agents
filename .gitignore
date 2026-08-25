@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+logs/*.jsonl
+.env
+requirements.txt.bak
+agents/marketing_agent/drafts/
+generated_features/
+.deps/

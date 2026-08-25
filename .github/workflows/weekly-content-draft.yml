@@ -1,0 +1,61 @@
+name: Weekly content drafts
+
+on:
+  schedule:
+    # Monday 14:00 UTC
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    if: ${{ vars.WEEKLY_DRAFTS_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout streamctx-agents
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout streamctx SDK
+        uses: actions/checkout@v4
+        with:
+          repository: streamctx/streamctx
+          path: .deps/streamctx
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-dotenv
+
+      - name: Generate weekly drafts
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+          STREAMCTX_PRODUCT_ROOT: ${{ github.workspace }}/.deps/streamctx
+          STREAMCTX_AGENTS_ROOT: ${{ github.workspace }}
+          CONTENT_PIPELINE_DB: ${{ github.workspace }}/data/content_pipeline.db
+          WEEKLY_DRAFT_LOG: ${{ github.workspace }}/logs/weekly_draft_runs.log
+          PYTHONPATH: ${{ github.workspace }}
+        run: python scripts/weekly_content_draft.py
+
+      - name: Commit pipeline store and run log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p data logs
+          git add data/content_pipeline.db logs/weekly_draft_runs.log
+          if git diff --cached --quiet; then
+            echo "No pipeline changes to commit"
+          else
+            git commit -m "chore: weekly marketing content drafts"
+            git push
+          fi

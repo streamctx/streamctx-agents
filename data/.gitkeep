@@ -1,0 +1,2 @@
+# content_pipeline.db is created by scripts/weekly_content_draft.py
+# (CI commits the SQLite file so the dashboard can read the same store).
