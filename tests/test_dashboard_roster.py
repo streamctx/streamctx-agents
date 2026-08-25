@@ -146,6 +146,58 @@ def test_assign_coding_task_rejects_empty(paths):
         assign_coding_task("  ", db_path=paths.coding)
 
 
+def test_assign_coding_task_nodeids_submits_path_a_job(paths, monkeypatch):
+    called: dict[str, object] = {}
+
+    def fake_submit(text, *, db_path=None, source_root=None):
+        called["text"] = text
+        called["db_path"] = db_path
+
+    monkeypatch.setattr("dashboard.submit_assigned_fix", fake_submit)
+    handle = assign_coding_task(
+        "Please fix tests/test_safety.py::test_rejected_entries_do_not_block_duplicates",
+        db_path=paths.coding,
+    )
+    assert handle.startswith("assign:")
+    assert "test_rejected_entries" in str(called["text"])
+    assert called["db_path"] == paths.coding
+    store = CodingStore(db_path=paths.coding, enable_default_notifier=False)
+    try:
+        assert store.count_entries() == 0
+    finally:
+        store.close()
+
+
+def test_assign_coding_task_nodeids_returns_existing_without_resubmit(
+    paths, monkeypatch
+):
+    from agents.coding_agent.assign_fix import failed_call_id_for_nodeids
+
+    nodeid = "tests/test_safety.py::test_rejected_entries_do_not_block_duplicates"
+    call_id = failed_call_id_for_nodeids([nodeid])
+    store = CodingStore(db_path=paths.coding, enable_default_notifier=False)
+    try:
+        existing = store.create_entry(
+            session_id=str(abs(call_id)),
+            root_cause="INTAKE",
+            confidence=0.6,
+            matched_pattern_id=None,
+            diff="--- a\n+++ b\n",
+            regression_test=None,
+            test_results={"failed_call_id": call_id, "passed": True},
+            retries_used=0,
+            status="ready_for_approval",
+        )
+    finally:
+        store.close()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("must not start a second assign job")
+
+    monkeypatch.setattr("dashboard.submit_assigned_fix", boom)
+    assert assign_coding_task(f"fix {nodeid}", db_path=paths.coding) == existing.entry_id
+
+
 def test_assign_marketing_task_queues_linkedin_draft_only(paths):
     entry_id = assign_marketing_task(
         "Draft a post about the new roster view.",

@@ -520,6 +520,67 @@ def submit_agent(key: str) -> None:
         _FUTURES[key] = _EXECUTOR.submit(_execute_agent, key)
 
 
+def submit_assigned_fix(
+    text: str,
+    *,
+    db_path: Optional[Path | str] = None,
+    source_root: Optional[Path | str] = None,
+) -> None:
+    """Kick off Path A gate + fix loop for a dashboard Assign with pytest nodeids."""
+    from agents.coding_agent.assign_fix import failed_call_id_for_nodeids
+    from agents.coding_agent.intake_fix import parse_pytest_nodeids
+
+    nodeids = parse_pytest_nodeids(text)
+    if not nodeids:
+        return
+    key = f"assign-fix:{failed_call_id_for_nodeids(nodeids)}"
+    with _LOCK:
+        future = _FUTURES.get(key)
+        if future is not None and not future.done():
+            return
+        coding = _RUNTIME["coding"]
+        coding.status = "running"
+        coding.error = None
+        coding.summary = "generating fix from assigned tests…"
+        _FUTURES[key] = _EXECUTOR.submit(
+            _execute_assigned_fix, text, db_path, source_root
+        )
+
+
+def _execute_assigned_fix(
+    text: str,
+    db_path: Optional[Path | str],
+    source_root: Optional[Path | str],
+) -> Any:
+    from agents.coding_agent.assign_fix import process_assigned_nodeids
+
+    try:
+        result = process_assigned_nodeids(
+            text,
+            db_path=db_path,
+            source_root=source_root,
+        )
+        entry = result.pending_entry
+        with _LOCK:
+            _RUNTIME["coding"].status = "completed"
+            _RUNTIME["coding"].last_run = _now_iso()
+            _RUNTIME["coding"].error = None
+            if entry is not None and entry.diff:
+                _RUNTIME["coding"].summary = (
+                    f"{entry.status} (confidence={entry.confidence:.2f})"
+                )
+            else:
+                _RUNTIME["coding"].summary = result.reason
+        return result
+    except Exception as exc:
+        with _LOCK:
+            _RUNTIME["coding"].status = "failed"
+            _RUNTIME["coding"].last_run = _now_iso()
+            _RUNTIME["coding"].error = f"{exc}\n{traceback.format_exc()}"
+            _RUNTIME["coding"].summary = str(exc)
+        raise
+
+
 def submit_intake_fix(
     entry_id: str,
     *,
@@ -638,6 +699,102 @@ def submit_competitor_check(
         _FUTURES[key] = _EXECUTOR.submit(
             _execute_competitor_check, text, db_path, config_path
         )
+
+
+def submit_research_poll(
+    *,
+    arxiv: bool = True,
+    github: bool = True,
+    db_path: Optional[Path | str] = None,
+) -> None:
+    """Kick off ``research_agent.poll.run_poll`` only (no directed Assign)."""
+    key = "research-poll"
+    with _LOCK:
+        future = _FUTURES.get(key)
+        if future is not None and not future.done():
+            return
+        state = _RUNTIME["research"]
+        state.status = "running"
+        state.error = None
+        state.summary = "polling arXiv / GitHub…"
+        _FUTURES[key] = _EXECUTOR.submit(
+            _execute_research_poll, arxiv, github, db_path
+        )
+
+
+def _execute_research_poll(
+    arxiv: bool,
+    github: bool,
+    db_path: Optional[Path | str],
+) -> Any:
+    from agents.research_agent.poll import run_poll, summarize
+    from agents.research_agent.storage import ResearchStore
+
+    store = ResearchStore(db_path=db_path)
+    try:
+        result = run_poll(store, arxiv=arxiv, github=github)
+        summary = summarize(result)
+        with _LOCK:
+            _RUNTIME["research"].status = "completed"
+            _RUNTIME["research"].last_run = _now_iso()
+            _RUNTIME["research"].error = None
+            _RUNTIME["research"].summary = summary
+        return result
+    except Exception as exc:
+        with _LOCK:
+            _RUNTIME["research"].status = "failed"
+            _RUNTIME["research"].last_run = _now_iso()
+            _RUNTIME["research"].error = f"{exc}\n{traceback.format_exc()}"
+            _RUNTIME["research"].summary = str(exc)
+        raise
+    finally:
+        store.close()
+
+
+def submit_weekly_drafts(
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    db_path: Optional[Path | str] = None,
+) -> None:
+    """Kick off ``scripts.weekly_content_draft.run_weekly_drafts``."""
+    key = "weekly-drafts"
+    with _LOCK:
+        future = _FUTURES.get(key)
+        if future is not None and not future.done():
+            return
+        state = _RUNTIME["marketing"]
+        state.status = "running"
+        state.error = None
+        state.summary = "generating weekly content drafts…"
+        _FUTURES[key] = _EXECUTOR.submit(
+            _execute_weekly_drafts, force, dry_run, db_path
+        )
+
+
+def _execute_weekly_drafts(
+    force: bool,
+    dry_run: bool,
+    db_path: Optional[Path | str],
+) -> Any:
+    from scripts.weekly_content_draft import run_weekly_drafts
+
+    try:
+        result = run_weekly_drafts(force=force, dry_run=dry_run, db_path=db_path)
+        summary = result.log_text().strip().splitlines()[0] if result.log_text() else "weekly drafts finished"
+        with _LOCK:
+            _RUNTIME["marketing"].status = "completed"
+            _RUNTIME["marketing"].last_run = _now_iso()
+            _RUNTIME["marketing"].error = None
+            _RUNTIME["marketing"].summary = summary
+        return result
+    except Exception as exc:
+        with _LOCK:
+            _RUNTIME["marketing"].status = "failed"
+            _RUNTIME["marketing"].last_run = _now_iso()
+            _RUNTIME["marketing"].error = f"{exc}\n{traceback.format_exc()}"
+            _RUNTIME["marketing"].summary = str(exc)
+        raise
 
 
 def _execute_competitor_check(
@@ -1579,10 +1736,27 @@ def assign_coding_task(
     text: str,
     *,
     db_path: Optional[Path | str] = None,
+    source_root: Optional[Path | str] = None,
 ) -> str:
     body = (text or "").strip()
     if not body:
         raise ValueError("task is empty")
+    from agents.coding_agent.assign_fix import failed_call_id_for_nodeids
+    from agents.coding_agent.intake_fix import parse_pytest_nodeids
+
+    nodeids = parse_pytest_nodeids(body)
+    if nodeids:
+        call_id = failed_call_id_for_nodeids(nodeids)
+        store = CodingStore(db_path=db_path, enable_default_notifier=False)
+        try:
+            existing = store.get_by_failed_call_id(call_id)
+            if existing is not None:
+                return existing.entry_id
+        finally:
+            store.close()
+        submit_assigned_fix(body, db_path=db_path, source_root=source_root)
+        return f"assign:{call_id}"
+
     summary = body.splitlines()[0][:80]
     store = CodingStore(db_path=db_path, enable_default_notifier=False)
     try:
@@ -1636,7 +1810,7 @@ def _in_streamlit() -> bool:
         return False
 
 
-def _render_roster_card(st: Any, card: RosterCard) -> None:
+def _render_roster_card(st: Any, card: RosterCard, *, key_prefix: str = "") -> None:
     with st.container(border=True):
         st.subheader(card.name)
         st.caption(card.role)
@@ -1657,11 +1831,11 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
                 "Assign a task",
                 value="",
                 disabled=True,
-                key=f"assign-disabled-{card.key}",
+                key=f"{key_prefix}assign-disabled-{card.key}",
             )
             st.caption(ASSIGN_DISABLED_CAPTION)
             return
-        with st.form(key=f"assign-form-{card.key}", clear_on_submit=True):
+        with st.form(key=f"{key_prefix}assign-form-{card.key}", clear_on_submit=True):
             text = st.text_input("Assign a task")
             submitted = st.form_submit_button("Assign")
             if submitted:
@@ -1671,8 +1845,13 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
                 else:
                     try:
                         if card.assign_mode == "coding":
+                            from agents.coding_agent.intake_fix import parse_pytest_nodeids
+
                             assign_coding_task(body)
-                            st.success("Queued as coding intake.")
+                            if parse_pytest_nodeids(body):
+                                st.success("Generating a fix from the assigned tests…")
+                            else:
+                                st.success("Queued as coding intake.")
                         elif card.assign_mode == "marketing":
                             assign_marketing_task(body)
                             st.success("Queued as a LinkedIn brief.")
@@ -1682,6 +1861,16 @@ def _render_roster_card(st: Any, card: RosterCard) -> None:
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
+
+
+def render_roster_card(
+    st: Any,
+    card: RosterCard,
+    *,
+    key_prefix: str = "",
+) -> None:
+    """Public roster profile card used by dashboard and agent_manager."""
+    _render_roster_card(st, card, key_prefix=key_prefix)
 
 
 def _render_roster_tab(st: Any, cards: list[RosterCard], briefing: MorningBriefing) -> None:
@@ -1710,6 +1899,45 @@ def _render_roster_tab(st: Any, cards: list[RosterCard], briefing: MorningBriefi
                 _render_roster_card(st, card)
 
 
+def render_pending_approvals(
+    st: Any,
+    *,
+    agent_key: Optional[str] = None,
+    key_prefix: str = "",
+) -> None:
+    """Pending-approval queue shared by the Control tab and Agent Manager."""
+    pending = load_pending_approvals()
+    if agent_key is not None:
+        pending = [item for item in pending if item.agent_key == agent_key]
+    if not pending:
+        if agent_key is None:
+            st.success("No pending_approval items across the four agents.")
+        else:
+            st.success("No pending_approval items for this agent.")
+        return
+    for item in pending:
+        with st.container(border=True):
+            st.markdown(f"**{item.agent_name}** · `{item.status}` · `{item.entry_id}`")
+            st.caption(f"{item.title} · {item.created_at}")
+            if item.preview:
+                st.code(item.preview, language=None)
+            actions = st.columns([1, 1, 6])
+            with actions[0]:
+                if st.button(
+                    "Approve",
+                    key=f"{key_prefix}approve-{item.store}-{item.entry_id}",
+                ):
+                    approve_entry(item)
+                    st.rerun()
+            with actions[1]:
+                if st.button(
+                    "Reject",
+                    key=f"{key_prefix}reject-{item.store}-{item.entry_id}",
+                ):
+                    reject_entry(item)
+                    st.rerun()
+
+
 def _render_control_tab(st: Any) -> None:
     cards = load_agent_statuses()
     columns = st.columns(4)
@@ -1732,24 +1960,7 @@ def _render_control_tab(st: Any) -> None:
 
     st.divider()
     st.header("Pending Approvals")
-    pending = load_pending_approvals()
-    if not pending:
-        st.success("No pending_approval items across the four agents.")
-    for item in pending:
-        with st.container(border=True):
-            st.markdown(f"**{item.agent_name}** · `{item.status}` · `{item.entry_id}`")
-            st.caption(f"{item.title} · {item.created_at}")
-            if item.preview:
-                st.code(item.preview, language=None)
-            actions = st.columns([1, 1, 6])
-            with actions[0]:
-                if st.button("Approve", key=f"approve-{item.store}-{item.entry_id}"):
-                    approve_entry(item)
-                    st.rerun()
-            with actions[1]:
-                if st.button("Reject", key=f"reject-{item.store}-{item.entry_id}"):
-                    reject_entry(item)
-                    st.rerun()
+    render_pending_approvals(st)
 
 
 def render() -> None:
@@ -1781,11 +1992,17 @@ def render() -> None:
     visit_cutoff = begin_dashboard_visit(now, st.session_state)
     roster_cards = load_roster_cards(now=now, visit_cutoff=visit_cutoff)
     briefing = build_morning_briefing(roster_cards)
-    tab_roster, tab_control = st.tabs(["Roster", "Control"])
+    tab_roster, tab_control, tab_pipeline = st.tabs(
+        ["Roster", "Control", "Content Pipeline"]
+    )
     with tab_roster:
         _render_roster_tab(st, roster_cards, briefing)
     with tab_control:
         _render_control_tab(st)
+    with tab_pipeline:
+        from content_pipeline import render_pipeline_tab
+
+        render_pipeline_tab(st)
 
     if auto or any_agent_running():
         time.sleep(REFRESH_SECONDS)

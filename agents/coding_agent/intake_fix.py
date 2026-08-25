@@ -1,11 +1,9 @@
-"""Generate a code fix from a human-approved dashboard intake ticket.
+"""Generate a code fix from a human-approved INTAKE ticket.
 
-Path A (``coding_agent.run``) diagnoses failed LLM calls, then runs
-``FixValidationLoop``. Path B (Roster Assign) only writes an INTAKE row with
-no diff. Approving that row is the confidence gate: this module parses pytest
-nodeids from the ticket, reuses ``FixGenerator`` + sandbox retries, and writes
-a child ``pending_approval`` row. A full-suite regression check is mandatory
-before ``ready_for_approval``.
+Roster Assign with pytest nodeids now goes through ``assign_fix`` (Path A's
+``ConfidenceGate.evaluate`` + ``FixValidationLoop``). This module still runs
+after a human approves a *placeholder* INTAKE row — free-text Assign or
+research handoff — where there is no failed LLM call.
 """
 
 from __future__ import annotations
