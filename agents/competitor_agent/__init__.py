@@ -1,10 +1,12 @@
 from agents.competitor_agent.models import (
     CompetitorSignal,
     CompetitorSnapshot,
+    PendingApprovalEntry,
     WeeklyReport,
 )
 from agents.competitor_agent.health import HealthSnapshot, collect_health
 from agents.competitor_agent.mentions import poll_all_mentions, poll_mentions
+from agents.competitor_agent.pending_approval import PendingApprovalStore
 from agents.competitor_agent.report import generate_weekly_report, render_report
 from agents.competitor_agent.settings import CompetitorConfig, CompetitorSource
 from agents.competitor_agent.snapshot import (
@@ -23,6 +25,8 @@ __all__ = [
     "CompetitorSource",
     "CompetitorStore",
     "HealthSnapshot",
+    "PendingApprovalEntry",
+    "PendingApprovalStore",
     "WeeklyReport",
     "collect_health",
     "generate_weekly_report",

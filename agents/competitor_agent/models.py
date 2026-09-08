@@ -65,3 +65,19 @@ class WeeklyReport:
     week_start: str
     content_markdown: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class PendingApprovalEntry:
+    """A detected signal or research summary awaiting founder review."""
+
+    entry_id: str
+    title: str
+    content: str
+    target: Optional[str]
+    mode: str
+    status: str
+    created_at: str
+    competitor_name: str
+    reviewed_at: Optional[str] = None
+    source_fingerprint: Optional[str] = None

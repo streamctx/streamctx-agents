@@ -40,6 +40,10 @@ from agents.coding_agent.pending_approval import (
     is_intake_task,
 )
 from agents.competitor_agent import competitor_agent
+from agents.competitor_agent.pending_approval import (
+    STATUS_PENDING as COMPETITOR_PENDING,
+    PendingApprovalStore as CompetitorPendingStore,
+)
 from agents.competitor_agent.storage import DEFAULT_AGENT_DB as COMPETITOR_DB
 from agents.marketing_agent import marketing_agent
 from agents.marketing_agent.pending_approval import (
@@ -110,6 +114,7 @@ MARKETING_PENDING_STATUSES = (
 PRESALES_PENDING_STATUSES = (PRESALES_PENDING,)
 TECHSUPPORT_PENDING_STATUSES = (TECHSUPPORT_PENDING,)
 LEGAL_PENDING_STATUSES = (LEGAL_PENDING,)
+COMPETITOR_PENDING_STATUSES = (COMPETITOR_PENDING,)
 REFRESH_SECONDS = 3
 MAX_PREVIEW_CHARS = 480
 
@@ -555,6 +560,40 @@ def _load_legal_pending() -> list[PendingItem]:
         store.close()
 
 
+def _load_competitor_pending() -> list[PendingItem]:
+    try:
+        store = CompetitorPendingStore(enable_default_notifier=False)
+    except Exception:
+        return []
+    try:
+        items: list[PendingItem] = []
+        for status in COMPETITOR_PENDING_STATUSES:
+            for entry in store.list_by_status(status):
+                name = entry.competitor_name or "competitor"
+                items.append(
+                    PendingItem(
+                        agent_key="competitor",
+                        agent_name=AGENT_BY_KEY["competitor"].name,
+                        entry_id=entry.entry_id,
+                        status=entry.status,
+                        created_at=entry.created_at,
+                        title=entry.title or f"{name} finding",
+                        preview=_clip(entry.content),
+                        store="competitor",
+                        summary=(
+                            f"Competitor: {entry.title}"
+                            if entry.title
+                            else f"Competitor: finding for {name}"
+                        ),
+                        body=str(entry.content or ""),
+                        kind="competitor_signal",
+                    )
+                )
+        return items
+    finally:
+        store.close()
+
+
 def _load_audit_pending() -> list[PendingItem]:
     """Fallback for the older JSONL audit log (competitor/marketing CLI drafts)."""
     items: list[PendingItem] = []
@@ -569,6 +608,9 @@ def _load_audit_pending() -> list[PendingItem]:
         if agent_id not in known_ids:
             continue
         key = key_by_id[agent_id]
+        if key == "competitor":
+            # SQLite pending_approval is the inbox source; JSONL stays underneath.
+            continue
         payload = entry.get("payload") or {}
         preview = (
             payload.get("summary")
@@ -637,6 +679,7 @@ def load_pending_approvals() -> list[PendingItem]:
         + _load_presales_pending()
         + _load_techsupport_pending()
         + _load_legal_pending()
+        + _load_competitor_pending()
         + _load_audit_pending()
         + _load_pipeline_pending()
     )
@@ -743,6 +786,7 @@ def approve_entry(
     presales_db: Optional[Path | str] = None,
     techsupport_db: Optional[Path | str] = None,
     legal_db: Optional[Path | str] = None,
+    competitor_db: Optional[Path | str] = None,
     pipeline_db: Optional[Path | str] = None,
 ) -> None:
     if item.store == "pipeline":
@@ -789,6 +833,13 @@ def approve_entry(
 
         approve_legal(item.entry_id, db_path=legal_db)
         return
+    if item.store == "competitor":
+        from agents.competitor_agent.competitor_agent import (
+            approve_draft as approve_competitor,
+        )
+
+        approve_competitor(item.entry_id, db_path=competitor_db)
+        return
     update_audit_status(item.entry_id, STATUS_APPROVED, approved_by="dashboard")
 
 
@@ -800,6 +851,7 @@ def reject_entry(
     presales_db: Optional[Path | str] = None,
     techsupport_db: Optional[Path | str] = None,
     legal_db: Optional[Path | str] = None,
+    competitor_db: Optional[Path | str] = None,
     pipeline_db: Optional[Path | str] = None,
 ) -> None:
     if item.store == "pipeline":
@@ -839,6 +891,13 @@ def reject_entry(
         )
 
         reject_legal(item.entry_id, db_path=legal_db)
+        return
+    if item.store == "competitor":
+        from agents.competitor_agent.competitor_agent import (
+            reject_draft as reject_competitor,
+        )
+
+        reject_competitor(item.entry_id, db_path=competitor_db)
         return
     update_audit_status(item.entry_id, STATUS_REJECTED, approved_by="dashboard")
 

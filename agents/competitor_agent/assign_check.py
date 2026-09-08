@@ -17,6 +17,7 @@ from agents.competitor_agent.models import (
     SNAPSHOT_TYPE_PRICING,
 )
 from agents.competitor_agent.settings import CompetitorConfig, CompetitorSource
+from agents.competitor_agent.pending_approval import queue_signals
 from agents.competitor_agent.snapshot import (
     FetchFn,
     LlmFn,
@@ -151,6 +152,7 @@ def run_directed_check(
         )
 
     if signals:
+        queue_signals(signals, db_path=store.db_path, enable_notifications=False)
         summary = signals[0].summary
         extra = f" (+{len(signals) - 1} more)" if len(signals) > 1 else ""
         return DirectedCheckResult(

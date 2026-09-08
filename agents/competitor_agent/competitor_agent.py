@@ -14,6 +14,11 @@ import argparse
 
 from openai import OpenAI
 from streamctx import get_tracker
+from agents.competitor_agent.pending_approval import (
+    PendingApprovalStore,
+    enqueue_research_summary,
+    queue_signals,
+)
 from agents.competitor_agent.settings import CompetitorConfig
 from agents.competitor_agent.snapshot import run_snapshot_poll
 from agents.competitor_agent.storage import CompetitorStore
@@ -41,6 +46,11 @@ def run(*, db=None, config_path=None):
     store = CompetitorStore(db_path=db)
     try:
         result = run_snapshot_poll(store, config=spec)
+        queue_signals(
+            result.signals,
+            db_path=store.db_path,
+            enable_notifications=False,
+        )
         print(
             f"[competitor-agent] signals={len(result.signals)} "
             f"skipped={len(result.skipped)} errors={len(result.errors)}"
@@ -90,6 +100,17 @@ def run_research_cycle(competitor_name, raw_research_text, question):
         },
         status=STATUS_PENDING,
     )
+    queue = PendingApprovalStore(enable_default_notifier=False)
+    try:
+        enqueue_research_summary(
+            competitor_name=competitor_name,
+            question=question,
+            summary=summary or "",
+            store=queue,
+            fingerprint=f"competitor-summary:{entry['id']}",
+        )
+    finally:
+        queue.close()
     print("\n--- Summary ---")
     print(summary)
     print(f"\n[competitor-agent] Logged for review. Entry id: {entry['id']}")
@@ -119,6 +140,36 @@ def summarize_research(competitor_name, raw_research_text, question, client):
     )
 
     return response.choices[0].message.content
+
+
+def approve_draft(
+    entry_id: str,
+    *,
+    db_path=None,
+) -> None:
+    """Mark a finding as founder-reviewed. Does not publish or set strategy."""
+    store = PendingApprovalStore(db_path=db_path, enable_default_notifier=False)
+    try:
+        store.approve(entry_id)
+        print(
+            f"[competitor-agent] approved {entry_id} "
+            "(informational only — not a strategy decision, nothing published)"
+        )
+    finally:
+        store.close()
+
+
+def reject_draft(
+    entry_id: str,
+    *,
+    db_path=None,
+) -> None:
+    store = PendingApprovalStore(db_path=db_path, enable_default_notifier=False)
+    try:
+        store.reject(entry_id)
+        print(f"[competitor-agent] rejected {entry_id}")
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

@@ -1022,6 +1022,10 @@ def _render_competitor_view(st: Any, card: RosterCard) -> None:
         st.rerun()
     _render_competitor_dedup(st)
     st.subheader("Pending approvals")
+    st.caption(
+        "New signals and research summaries queue here. Approve/Decline only "
+        "updates the review row — nothing is published and this is not a strategy decision."
+    )
     render_pending_approvals(st, agent_key="competitor", key_prefix="am-comp-")
 
 

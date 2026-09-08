@@ -76,6 +76,24 @@ def test_inbox_summary_falls_back_to_title():
     assert inbox_summary(item) == "Marketing: linkedin post"
 
 
+def test_competitor_inbox_summary():
+    item = PendingItem(
+        agent_key="competitor",
+        agent_name="Competitor Agent",
+        entry_id="c1",
+        status="pending",
+        created_at=NOW.isoformat(),
+        title="Langfuse: mention",
+        preview="HN thread",
+        store="competitor",
+        summary="Competitor: Langfuse: mention",
+        body="HN thread comparing tracing.",
+        kind="competitor_signal",
+    )
+    assert inbox_summary(item) == "Competitor: Langfuse: mention"
+    assert not is_marketing_content_draft(item)
+
+
 def test_presales_summary_uses_name_role_company():
     entry = SimpleNamespace(title="Jane Doe · CTO @ Acme")
     assert (
