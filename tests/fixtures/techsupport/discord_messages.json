@@ -1,0 +1,20 @@
+[
+  {
+    "id": "1001",
+    "type": 0,
+    "content": "How do I install streamctx and set OPENROUTER_API_KEY?",
+    "author": {"username": "jamie", "bot": false}
+  },
+  {
+    "id": "1002",
+    "type": 0,
+    "content": "",
+    "author": {"username": "empty", "bot": false}
+  },
+  {
+    "id": "1003",
+    "type": 0,
+    "content": "bot noise",
+    "author": {"username": "hook", "bot": true}
+  }
+]

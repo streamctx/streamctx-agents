@@ -39,6 +39,7 @@ from dashboard import (
     assign_coding_task,
     assign_competitor_task,
     assign_marketing_task,
+    assign_presales_task,
     begin_dashboard_visit,
     build_morning_briefing,
     compose_briefing_line,
@@ -63,6 +64,9 @@ def paths(tmp_path: Path) -> RosterDbPaths:
         marketing=tmp_path / "marketing_agent.db",
         competitor=tmp_path / "competitor_agent.db",
         research=tmp_path / "research_agent.db",
+        presales=tmp_path / "leads.db",
+        techsupport=tmp_path / "support_tickets.db",
+        legal=tmp_path / "compliance_findings.db",
     )
 
 
@@ -216,6 +220,28 @@ def test_assign_marketing_task_queues_linkedin_draft_only(paths):
         assert (entry.source_fingerprint or "").startswith(BRIEF_FINGERPRINT_PREFIX)
     finally:
         store.close()
+
+
+def test_assign_presales_task_imports_sales_nav_csv(paths):
+    fixture = (
+        Path(__file__).resolve().parent / "fixtures" / "presales" / "sales_navigator_export.csv"
+    )
+    label = assign_presales_task(str(fixture), db_path=paths.presales)
+    assert "imported=" in label
+    from agents.presales_agent.storage import LeadStore
+
+    store = LeadStore(db_path=paths.presales)
+    try:
+        leads = store.list_leads(order_by_score=False)
+        assert len(leads) >= 6
+        assert any(lead.name == "Avery Chen" for lead in leads)
+    finally:
+        store.close()
+
+
+def test_assign_presales_task_rejects_empty(paths):
+    with pytest.raises(ValueError, match="empty"):
+        assign_presales_task("  ", db_path=paths.presales)
 
 
 def test_assign_competitor_task_kicks_off_directed_check(paths, tmp_path, monkeypatch):

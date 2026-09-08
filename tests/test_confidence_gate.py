@@ -74,6 +74,9 @@ def test_pending_approval_table_schema(approval_store, tmp_path):
             "retries_used",
             "status",
             "created_at",
+            "generation_mode",
+            "auto_applied",
+            "verification_mode",
         }
         assert expected.issubset(columns)
     finally:

@@ -18,8 +18,13 @@ DEFAULT_AGENT_DB = Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamc
 STATUS_NEEDS_HUMAN_REVIEW = "needs_human_review"
 STATUS_READY_FOR_APPROVAL = "ready_for_approval"
 STATUS_AUTO_FIX_FAILED = "auto_fix_failed"
+STATUS_AUTO_APPLIED = "auto_applied"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
+
+VERIFICATION_PENDING = "pending"
+VERIFICATION_DRY_RUN_PASSED = "dry_run_passed"
+VERIFICATION_DRY_RUN_FAILED = "dry_run_failed"
 
 ROOT_CAUSE_INTAKE = "INTAKE"
 INTAKE_KIND = "intake"
@@ -72,11 +77,29 @@ class PendingApprovalStore:
                     retries_used INTEGER,
                     status TEXT,
                     created_at TIMESTAMP,
-                    applied_commit TEXT
+                    applied_commit TEXT,
+                    generation_mode TEXT DEFAULT 'api',
+                    auto_applied BOOLEAN DEFAULT 0,
+                    verification_mode TEXT DEFAULT 'pending'
                 );
                 """
             )
             self._ensure_column("pending_approval", "applied_commit", "TEXT")
+            self._ensure_column(
+                "pending_approval",
+                "generation_mode",
+                "TEXT DEFAULT 'api'",
+            )
+            self._ensure_column(
+                "pending_approval",
+                "auto_applied",
+                "BOOLEAN DEFAULT 0",
+            )
+            self._ensure_column(
+                "pending_approval",
+                "verification_mode",
+                "TEXT DEFAULT 'pending'",
+            )
             self._conn.commit()
 
     def _ensure_column(self, table: str, column: str, col_type: str) -> None:
@@ -238,10 +261,16 @@ class PendingApprovalStore:
         status: str,
         entry_id: Optional[str] = None,
         applied_commit: Optional[str] = None,
+        generation_mode: str = "api",
+        auto_applied: bool = False,
+        verification_mode: str = VERIFICATION_PENDING,
     ) -> PendingApprovalEntry:
         entry_id = entry_id or str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
         test_results_json = _serialize_test_results(test_results)
+        mode = generation_mode or "api"
+        applied = bool(auto_applied)
+        verify_mode = verification_mode or VERIFICATION_PENDING
 
         with self._lock:
             self._conn.execute(
@@ -249,8 +278,9 @@ class PendingApprovalStore:
                 INSERT INTO pending_approval (
                     entry_id, session_id, root_cause, confidence,
                     matched_pattern_id, diff, regression_test, test_results,
-                    retries_used, status, created_at, applied_commit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    retries_used, status, created_at, applied_commit,
+                    generation_mode, auto_applied, verification_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
@@ -265,6 +295,9 @@ class PendingApprovalStore:
                     status,
                     created_at,
                     applied_commit,
+                    mode,
+                    int(applied),
+                    verify_mode,
                 ),
             )
             self._conn.commit()
@@ -282,6 +315,9 @@ class PendingApprovalStore:
             status=status,
             created_at=created_at,
             applied_commit=applied_commit,
+            generation_mode=mode,
+            auto_applied=applied,
+            verification_mode=verify_mode,
         )
         self._dispatch_notification(entry)
         return entry
@@ -420,4 +456,7 @@ def _row_to_entry(row: dict[str, Any]) -> PendingApprovalEntry:
         status=str(row["status"]),
         created_at=str(row["created_at"]),
         applied_commit=row.get("applied_commit"),
+        generation_mode=str(row.get("generation_mode") or "api"),
+        auto_applied=bool(row.get("auto_applied") or False),
+        verification_mode=str(row.get("verification_mode") or VERIFICATION_PENDING),
     )

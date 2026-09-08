@@ -219,5 +219,63 @@ def test_fix_loop_uses_pattern_template_without_llm(approval_store):
     assert result.pending_entry.status == STATUS_READY_FOR_APPROVAL
 
 
+def test_fix_loop_uses_diagnosis_reason_for_negative_failed_call_id(approval_store):
+    captured: dict[str, str] = {}
+
+    def llm_fn(request: FixRequest) -> FixProposal:
+        captured["error"] = request.error_message
+        return FixProposal(
+            diff=FIX_DIFF,
+            regression_test=REGRESSION_TEST,
+            regression_test_path="tests/test_regression_session_99.py",
+        )
+
+    class EmptyStorage:
+        def get_calls_for_session(self, session_id):
+            return []
+
+    loop = FixValidationLoop(
+        approval_store=approval_store,
+        source_root=FIXTURE_ROOT,
+        fix_generator=FixGenerator(llm_fn=llm_fn),
+        storage=EmptyStorage(),
+    )
+    result = loop.run(
+        _gate(
+            failed_call_id=-42,
+            session_id=42,
+            reason="Assigned pytest nodeids:\nbroken_math failure",
+        )
+    )
+    assert result.success is True
+    assert "Assigned pytest nodeids" in captured["error"]
+
+
+def test_fix_loop_prefers_session_error_for_path_a_failed_call_id(approval_store):
+    captured: dict[str, str] = {}
+
+    def llm_fn(request: FixRequest) -> FixProposal:
+        captured["error"] = request.error_message
+        return FixProposal(
+            diff=FIX_DIFF,
+            regression_test=REGRESSION_TEST,
+            regression_test_path="tests/test_regression_session_99.py",
+        )
+
+    class SessionStorage:
+        def get_calls_for_session(self, session_id):
+            return [{"id": 1, "error_message": "session traceback"}]
+
+    loop = FixValidationLoop(
+        approval_store=approval_store,
+        source_root=FIXTURE_ROOT,
+        fix_generator=FixGenerator(llm_fn=llm_fn),
+        storage=SessionStorage(),
+    )
+    result = loop.run(_gate(failed_call_id=1, reason="attribution reason only"))
+    assert result.success is True
+    assert captured["error"] == "session traceback"
+
+
 def _should_not_be_called(request: FixRequest) -> FixProposal:
     raise AssertionError("LLM must not run when gate blocks fix generation.")

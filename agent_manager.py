@@ -1,8 +1,8 @@
-"""StreamCtx Agent Manager — command center over the four existing agents.
+"""StreamCtx Agent Manager — command center over the existing agents.
 
 Routing/UI layer only. Dispatches to dashboard + agent entry points that
-already exist; it does not change coding/marketing/research/competitor
-internals. Visual language matches the dark trace/checkpoint board in
+already exist; it does not change coding/marketing/research/competitor/
+presales internals. Visual language matches the dark trace/checkpoint board in
 ``content_pipeline.py``.
 
 Run:  streamlit run agent_manager.py
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from agents.presales_agent.presales_agent import assign_presales_task
 from dashboard import (
     AGENT_BY_KEY,
     AGENTS,
@@ -29,6 +30,7 @@ from dashboard import (
     assign_marketing_task,
     begin_dashboard_visit,
     load_agent_statuses,
+    load_pending_approvals,
     load_roster_cards,
     render_pending_approvals,
     render_roster_card,
@@ -36,6 +38,7 @@ from dashboard import (
     submit_research_poll,
     submit_weekly_drafts,
 )
+from home_view import render_unified_inbox
 from shared.audit_log import log_action
 from shared.config import AGENT_IDS, COMPETITORS_TRACKED, STATUS_PENDING
 
@@ -81,7 +84,6 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "linkedin",
         "dev.to",
         "community post",
-        "outreach",
         "twitter",
         "reddit",
     ),
@@ -109,6 +111,45 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "braintrust",
         "laminar",
         "latitude",
+    ),
+    "presales": (
+        "presales",
+        "pre-sales",
+        "pre sales",
+        "presales agent",
+        "sales navigator",
+        "lead scoring",
+        "outreach draft",
+        "csv import",
+        "import csv",
+        "leads.csv",
+        "linkedin csv",
+        "outreach",
+        "leads",
+    ),
+    "techsupport": (
+        "tech support",
+        "techsupport",
+        "support agent",
+        "support ticket",
+        "support tickets",
+        "github issue",
+        "github issues",
+        "support",
+        "ticket",
+        "issue",
+        "discord",
+    ),
+    "legal": (
+        "legal agent",
+        "legal compliance",
+        "compliance agent",
+        "privacy policy",
+        "legal",
+        "compliance",
+        "dpdp",
+        "privacy",
+        "terms",
     ),
 }
 
@@ -186,6 +227,9 @@ MANAGER_CSS = """
 .am-tile-marketing { border-left-color: #3fb950; }
 .am-tile-research { border-left-color: #a371f7; }
 .am-tile-competitor { border-left-color: #d29922; }
+.am-tile-presales { border-left-color: #f0883e; }
+.am-tile-techsupport { border-left-color: #39d0d8; }
+.am-tile-legal { border-left-color: #f778ba; }
 .am-tile-name {
   color: #e6edf3;
   font-weight: 650;
@@ -233,6 +277,14 @@ div[class*="st-key-am-open-coding"] button { border-top: 2px solid #58a6ff !impo
 div[class*="st-key-am-open-marketing"] button { border-top: 2px solid #3fb950 !important; }
 div[class*="st-key-am-open-research"] button { border-top: 2px solid #a371f7 !important; }
 div[class*="st-key-am-open-competitor"] button { border-top: 2px solid #d29922 !important; }
+div[class*="st-key-am-open-presales"] button { border-top: 2px solid #f0883e !important; }
+div[class*="st-key-am-open-techsupport"] button { border-top: 2px solid #39d0d8 !important; }
+div[class*="st-key-am-open-legal"] button { border-top: 2px solid #f778ba !important; }
+div[class*="st-key-am-tile-assign-"] button {
+  background: #21262d !important;
+  border: 1px solid #30363d !important;
+  color: #e6edf3 !important;
+}
 </style>
 """
 
@@ -418,6 +470,51 @@ def dispatch_command(agent_key: str, text: str) -> DispatchResult:
             audit_id=audit_id,
         )
 
+    if agent_key == "presales":
+        lowered = body.lower()
+        looks_csv = ".csv" in lowered
+        if looks_csv and not _is_run_command(body):
+            audit_id = _audit_command(agent_key, body, "import")
+            label = assign_presales_task(body)
+            return DispatchResult(
+                agent_key,
+                "import",
+                f"Imported Sales Navigator CSV ({label}). Nothing was sent.",
+                entry_id=label,
+                audit_id=audit_id,
+            )
+        audit_id = _audit_command(agent_key, body, "run")
+        submit_agent("presales")
+        return DispatchResult(
+            agent_key,
+            "run",
+            "Started presales_agent.run() (score → draft → pending_approval). "
+            "Nothing is sent.",
+            audit_id=audit_id,
+        )
+
+    if agent_key == "techsupport":
+        audit_id = _audit_command(agent_key, body, "poll")
+        submit_agent("techsupport")
+        return DispatchResult(
+            agent_key,
+            "poll",
+            "Started techsupport_agent.run() (poll GitHub/Discord → classify → "
+            "KB → pending_approval). Nothing is posted.",
+            audit_id=audit_id,
+        )
+
+    if agent_key == "legal":
+        audit_id = _audit_command(agent_key, body, "scan")
+        submit_agent("legal")
+        return DispatchResult(
+            agent_key,
+            "scan",
+            "Started legal_compliance_agent.run() (scan TERMS/PRIVACY/code → "
+            "DPDP checklist → pending_approval). Nothing is published. Not legal advice.",
+            audit_id=audit_id,
+        )
+
     raise ValueError(f"unsupported agent: {agent_key}")
 
 
@@ -477,7 +574,8 @@ def _render_command_bar(st: Any, *, scoped_agent: Optional[str] = None) -> None:
             label,
             placeholder=(
                 "e.g. fix tests/test_foo.py::test_bar  ·  poll arxiv  ·  "
-                "Langfuse pricing  ·  draft a LinkedIn post"
+                "Langfuse pricing  ·  csv import leads.csv  ·  "
+                "github issue  ·  dpdp checklist  ·  draft a LinkedIn post"
                 if scoped_agent is None
                 else f"Command for {AGENT_BY_KEY[scoped_agent].name} only"
             ),
@@ -542,8 +640,8 @@ def _render_tiles(
     roster: dict[str, RosterCard],
     statuses: dict[str, dict[str, Any]],
 ) -> None:
-    pairs = (AGENTS[0:2], AGENTS[2:4])
-    for pair in pairs:
+    for i in range(0, len(AGENTS), 2):
+        pair = AGENTS[i : i + 2]
         columns = st.columns(2)
         for column, spec in zip(columns, pair):
             card = roster.get(spec.key)
@@ -563,6 +661,15 @@ def _render_tiles(
                 ):
                     st.session_state[VIEW_KEY] = spec.key
                     st.rerun()
+                with st.form(f"am-tile-assign-{spec.key}", clear_on_submit=True):
+                    text = st.text_input("Assign a task")
+                    submitted = st.form_submit_button("Assign", use_container_width=True)
+                    if submitted:
+                        body = (text or "").strip()
+                        if not body:
+                            st.warning("Enter a task first.")
+                        else:
+                            _handle_dispatch(st, spec.key, body)
 
 
 def _render_scoped_command(st: Any, agent_key: str) -> None:
@@ -918,6 +1025,30 @@ def _render_competitor_view(st: Any, card: RosterCard) -> None:
     render_pending_approvals(st, agent_key="competitor", key_prefix="am-comp-")
 
 
+def _render_presales_view(st: Any, card: RosterCard) -> None:
+    from agents.presales_agent.tab import render_presales_tab
+
+    render_roster_card(st, card, key_prefix="am-")
+    _render_scoped_command(st, "presales")
+    render_presales_tab(st, key_prefix="am-ps-")
+
+
+def _render_techsupport_view(st: Any, card: RosterCard) -> None:
+    from agents.techsupport_agent.tab import render_techsupport_tab
+
+    render_roster_card(st, card, key_prefix="am-")
+    _render_scoped_command(st, "techsupport")
+    render_techsupport_tab(st, key_prefix="am-ts-")
+
+
+def _render_legal_view(st: Any, card: RosterCard) -> None:
+    from agents.legal_compliance_agent.tab import render_legal_tab
+
+    render_roster_card(st, card, key_prefix="am-")
+    _render_scoped_command(st, "legal")
+    render_legal_tab(st, key_prefix="am-lc-")
+
+
 def _render_agent_view(
     st: Any,
     agent_key: str,
@@ -953,6 +1084,16 @@ def _render_agent_view(
         return
     if agent_key == "competitor":
         _render_competitor_view(st, card)
+        return
+    if agent_key == "presales":
+        _render_presales_view(st, card)
+        return
+    if agent_key == "techsupport":
+        _render_techsupport_view(st, card)
+        return
+    if agent_key == "legal":
+        _render_legal_view(st, card)
+        return
 
 
 def render() -> None:
@@ -975,8 +1116,9 @@ def render() -> None:
             unsafe_allow_html=True,
         )
         st.markdown(
-            '<div class="am-sub">Command bar routes to the four existing agents. '
-            "Tiles open each agent’s real feature set — not a generic log.</div>",
+            '<div class="am-sub">Command bar routes to the existing agents. '
+            "Home is today’s inbox. Tiles open each agent’s real feature set — "
+            "not a generic log.</div>",
             unsafe_allow_html=True,
         )
     with refresh:
@@ -1003,6 +1145,18 @@ def render() -> None:
     if view in AGENT_BY_KEY:
         _render_agent_view(st, view, roster)
     else:
+        pending = load_pending_approvals()
+
+        def _open_from_inbox(agent_key: str) -> None:
+            st.session_state[VIEW_KEY] = agent_key
+
+        render_unified_inbox(
+            st,
+            pending,
+            key_prefix="am-home-",
+            on_open_agent=_open_from_inbox,
+        )
+        st.markdown("### Agents")
         _render_tiles(st, roster, statuses)
 
     if auto or any_agent_running():

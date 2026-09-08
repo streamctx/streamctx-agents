@@ -15,8 +15,12 @@ from agents.coding_agent.failure_detector import poll_failed_calls, poll_failed_
 from agents.coding_agent.fix_patterns import FixPatternStore
 from agents.coding_agent.models import FailedCallRecord
 from streamctx.attribution import AttributionEngine
-from streamctx.replay import CounterfactualReplayer
 from streamctx.storage import SessionStorage
+
+try:
+    from streamctx.replayer import CounterfactualReplayer
+except ModuleNotFoundError:
+    from streamctx.replay import CounterfactualReplayer
 
 
 def _seed_drift_failure(storage: SessionStorage) -> FailedCallRecord:

@@ -1,0 +1,175 @@
+{
+  "min_score": 0.55,
+  "weights": {
+    "role": 0.5,
+    "company_size": 0.25,
+    "industry": 0.25
+  },
+  "roles": [
+    {
+      "score": 1.0,
+      "label": "CTO / chief technology",
+      "patterns": ["\\bcto\\b", "chief technology", "chief technical officer"]
+    },
+    {
+      "score": 0.95,
+      "label": "VP / Head of Engineering",
+      "patterns": [
+        "vp of engineering",
+        "vp engineering",
+        "vice president of engineering",
+        "head of engineering",
+        "head of eng\\b",
+        "eng(?:ineering)? head"
+      ]
+    },
+    {
+      "score": 0.88,
+      "label": "Engineering director",
+      "patterns": [
+        "director of engineering",
+        "engineering director",
+        "director of software"
+      ]
+    },
+    {
+      "score": 0.9,
+      "label": "Founder / CEO (small-mid company)",
+      "patterns": ["\\bfounder\\b", "co-founder", "\\bceo\\b", "chief executive"],
+      "max_headcount": 200
+    },
+    {
+      "score": 0.82,
+      "label": "Head / VP of Product",
+      "patterns": [
+        "\\bcpo\\b",
+        "chief product",
+        "vp of product",
+        "vp product",
+        "head of product"
+      ]
+    },
+    {
+      "score": 0.75,
+      "label": "Product manager",
+      "patterns": [
+        "product manager",
+        "\\bpm\\b",
+        "group product manager",
+        "senior product manager"
+      ]
+    },
+    {
+      "score": 0.7,
+      "label": "Eng manager / staff+",
+      "patterns": [
+        "engineering manager",
+        "eng manager",
+        "staff engineer",
+        "principal engineer",
+        "tech lead",
+        "technical lead"
+      ]
+    },
+    {
+      "score": 0.55,
+      "label": "Founder / CEO (larger company)",
+      "patterns": ["\\bfounder\\b", "co-founder", "\\bceo\\b", "chief executive"]
+    },
+    {
+      "score": 0.4,
+      "label": "Individual contributor engineer",
+      "patterns": [
+        "software engineer",
+        "\\bswe\\b",
+        "developer",
+        "\\bsre\\b",
+        "devops",
+        "machine learning engineer",
+        "ml engineer"
+      ]
+    },
+    {
+      "score": 0.12,
+      "label": "Go-to-market / non-buyer",
+      "patterns": [
+        "account executive",
+        "\\bae\\b",
+        "sales manager",
+        "sales development",
+        "\\bsdr\\b",
+        "recruiter",
+        "human resources",
+        "\\bhr\\b",
+        "marketing coordinator",
+        "customer success"
+      ]
+    }
+  ],
+  "unknown_role_score": 0.28,
+  "size_buckets": [
+    {"min": 51, "max": 200, "score": 1.0, "label": "51-200 (sweet spot)"},
+    {"min": 11, "max": 50, "score": 0.95, "label": "11-50 (startup)"},
+    {"min": 1, "max": 10, "score": 0.8, "label": "1-10 (very early)"},
+    {"min": 201, "max": 500, "score": 0.85, "label": "201-500"},
+    {"min": 501, "max": 1000, "score": 0.7, "label": "501-1000"},
+    {"min": 1001, "max": 5000, "score": 0.5, "label": "1001-5000"},
+    {"min": 5001, "max": null, "score": 0.3, "label": "5001+"}
+  ],
+  "unknown_size_score": 0.45,
+  "industries": [
+    {
+      "score": 1.0,
+      "label": "AI / developer tools",
+      "patterns": [
+        "artificial intelligence",
+        "machine learning",
+        "\\bllm\\b",
+        "\\bai\\b",
+        "gen(?:erative)?\\s*ai",
+        "developer tools",
+        "dev tools",
+        "devtools",
+        "developer platform",
+        "\\bdevops\\b",
+        "software development",
+        "computer software",
+        "information technology",
+        "\\bsaas\\b",
+        "cloud computing",
+        "data infrastructure",
+        "mlops",
+        "observability"
+      ]
+    },
+    {
+      "score": 0.6,
+      "label": "tech-adjacent",
+      "patterns": [
+        "fintech",
+        "financial technology",
+        "cybersecurity",
+        "cyber security",
+        "information security",
+        "analytics",
+        "data analytics"
+      ]
+    },
+    {
+      "score": 0.25,
+      "label": "non-software",
+      "patterns": [
+        "manufacturing",
+        "retail",
+        "hospitality",
+        "real estate",
+        "construction",
+        "agriculture",
+        "oil and gas",
+        "mining",
+        "food and beverage"
+      ]
+    }
+  ],
+  "unknown_industry_score": 0.4
+}

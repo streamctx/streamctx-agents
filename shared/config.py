@@ -28,6 +28,9 @@ AGENT_IDS = {
     "marketing": "marketing-agent",
     "competitor": "competitor-agent",
     "research": "research-agent",
+    "presales": "presales-agent",
+    "techsupport": "techsupport-agent",
+    "legal": "legal-compliance-agent",
 }
 
 # --- Daily/weekly pacing limits (marketing agent) ---

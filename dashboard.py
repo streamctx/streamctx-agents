@@ -1,4 +1,4 @@
-"""StreamCtx Agent Control Center — Streamlit dashboard for the four agents.
+"""StreamCtx Agent Control Center — Streamlit dashboard for the agents.
 
 Run history is read from ``~/.streamctx/sessions.db`` through StreamCtx's
 existing WAL-mode ``SessionStorage`` connection helpers. Pending-approval
@@ -53,8 +53,39 @@ from agents.marketing_agent.pending_approval import (
     PendingApprovalStore as MarketingStore,
     is_marketing_brief,
 )
+from content_pipeline import (
+    CHANNELS as PIPELINE_CHANNELS,
+    DEFAULT_PIPELINE_DB as PIPELINE_DB,
+    STAGE_NEEDS_REVIEW,
+    STAGE_READY_TO_POST,
+    ContentPipelineStore,
+)
+from agents.presales_agent import presales_agent
+from agents.presales_agent.pending_approval import (
+    DEFAULT_AGENT_DB as PRESALES_DB,
+    STATUS_PENDING as PRESALES_PENDING,
+    STATUS_APPROVED as PRESALES_APPROVED,
+    STATUS_REJECTED as PRESALES_REJECTED,
+    PendingApprovalStore as PresalesStore,
+)
 from agents.research_agent import research_agent
 from agents.research_agent.storage import DEFAULT_AGENT_DB as RESEARCH_DB
+from agents.techsupport_agent import techsupport_agent
+from agents.techsupport_agent.pending_approval import (
+    DEFAULT_AGENT_DB as TECHSUPPORT_DB,
+    STATUS_PENDING as TECHSUPPORT_PENDING,
+    STATUS_APPROVED as TECHSUPPORT_APPROVED,
+    STATUS_REJECTED as TECHSUPPORT_REJECTED,
+    PendingApprovalStore as TechsupportStore,
+)
+from agents.legal_compliance_agent import legal_compliance_agent
+from agents.legal_compliance_agent.pending_approval import (
+    DEFAULT_AGENT_DB as LEGAL_DB,
+    STATUS_PENDING as LEGAL_PENDING,
+    STATUS_APPROVED as LEGAL_APPROVED,
+    STATUS_REJECTED as LEGAL_REJECTED,
+    PendingApprovalStore as LegalStore,
+)
 from shared.audit_log import get_pending_actions, update_status as update_audit_status
 from shared.config import AGENT_IDS, STATUS_APPROVED, STATUS_REJECTED
 
@@ -76,10 +107,13 @@ MARKETING_PENDING_STATUSES = (
     MARKETING_PENDING,
     STATUS_DRAFT_FAILED,
 )
+PRESALES_PENDING_STATUSES = (PRESALES_PENDING,)
+TECHSUPPORT_PENDING_STATUSES = (TECHSUPPORT_PENDING,)
+LEGAL_PENDING_STATUSES = (LEGAL_PENDING,)
 REFRESH_SECONDS = 3
 MAX_PREVIEW_CHARS = 480
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_EXECUTOR = ThreadPoolExecutor(max_workers=7)
 _LOCK = threading.Lock()
 _FUTURES: dict[str, Any] = {}
 
@@ -91,7 +125,7 @@ class AgentSpec:
     agent_id: str
     run: Callable[[], Any]
     role: str
-    assign_mode: str  # coding | marketing | none
+    assign_mode: str  # coding | marketing | competitor | presales | run | none
 
 
 @dataclass
@@ -112,7 +146,10 @@ class PendingItem:
     created_at: str
     title: str
     preview: str
-    store: str  # coding | marketing | audit
+    store: str  # coding | marketing | presales | techsupport | legal | audit | pipeline
+    summary: str = ""
+    body: str = ""
+    kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,6 +158,10 @@ class RosterDbPaths:
     marketing: Path = MARKETING_DB
     competitor: Path = COMPETITOR_DB
     research: Path = RESEARCH_DB
+    presales: Path = PRESALES_DB
+    techsupport: Path = TECHSUPPORT_DB
+    legal: Path = LEGAL_DB
+    pipeline: Path = PIPELINE_DB
 
 
 @dataclass(frozen=True)
@@ -201,6 +242,30 @@ AGENTS: tuple[AgentSpec, ...] = (
         research_agent.run,
         "finds papers and features",
         "none",
+    ),
+    AgentSpec(
+        "presales",
+        "Pre-Sales Agent",
+        AGENT_IDS["presales"],
+        presales_agent.run,
+        "drafts outreach from CSV leads",
+        "presales",
+    ),
+    AgentSpec(
+        "techsupport",
+        "Tech Support Agent",
+        AGENT_IDS["techsupport"],
+        techsupport_agent.run,
+        "answers support tickets from GitHub/Discord",
+        "run",
+    ),
+    AgentSpec(
+        "legal",
+        "Legal / Compliance Agent",
+        AGENT_IDS["legal"],
+        legal_compliance_agent.run,
+        "reviews legal/compliance docs and drafts DPDP checklist",
+        "run",
     ),
 )
 AGENT_BY_KEY = {spec.key: spec for spec in AGENTS}
@@ -295,6 +360,15 @@ def _clip(text: Optional[str], limit: int = MAX_PREVIEW_CHARS) -> str:
     return body[: limit - 1] + "…"
 
 
+def _coding_inbox_summary(entry: Any, *, research: bool) -> str:
+    if research:
+        return "Research: intake task for review"
+    if getattr(entry, "root_cause", None) == ROOT_CAUSE_INTAKE:
+        return "Coding: assigned task for review"
+    root = str(getattr(entry, "root_cause", None) or "fix")
+    return f"Coding: {root} fix for review"
+
+
 def _load_coding_pending() -> list[PendingItem]:
     store = CodingStore(enable_default_notifier=False)
     try:
@@ -310,6 +384,11 @@ def _load_coding_pending() -> list[PendingItem]:
                     else f"Research intake · {entry.session_id}"
                 )
                 preview = entry.diff or entry.test_results or entry.regression_test or ""
+                kind = (
+                    "research_intake"
+                    if research
+                    else ("coding_intake" if entry.root_cause == ROOT_CAUSE_INTAKE else "coding_fix")
+                )
                 items.append(
                     PendingItem(
                         agent_key=agent_key,
@@ -320,11 +399,24 @@ def _load_coding_pending() -> list[PendingItem]:
                         title=title,
                         preview=_clip(preview),
                         store="coding",
+                        summary=_coding_inbox_summary(entry, research=research),
+                        body=str(preview or ""),
+                        kind=kind,
                     )
                 )
         return items
     finally:
         store.close()
+
+
+def _marketing_inbox_summary(entry: Any) -> str:
+    if is_marketing_brief(entry):
+        return "Marketing: assigned brief for review"
+    platform = str(getattr(entry, "platform", "") or "content").replace("_", " ")
+    ctype = str(getattr(entry, "content_type", "") or "draft")
+    if platform.lower() == "linkedin":
+        return f"Marketing: LinkedIn {ctype} draft for review"
+    return f"Marketing: {platform} {ctype} draft for review"
 
 
 def _load_marketing_pending() -> list[PendingItem]:
@@ -334,6 +426,7 @@ def _load_marketing_pending() -> list[PendingItem]:
         for status in MARKETING_PENDING_STATUSES:
             for entry in store.list_by_status(status):
                 target = f" → {entry.target}" if entry.target else ""
+                brief = is_marketing_brief(entry)
                 items.append(
                     PendingItem(
                         agent_key="marketing",
@@ -344,6 +437,117 @@ def _load_marketing_pending() -> list[PendingItem]:
                         title=f"{entry.platform} {entry.content_type}{target}",
                         preview=_clip(entry.content),
                         store="marketing",
+                        summary=_marketing_inbox_summary(entry),
+                        body=str(entry.content or ""),
+                        kind="marketing_brief" if brief else "marketing_draft",
+                    )
+                )
+        return items
+    finally:
+        store.close()
+
+
+def _presales_inbox_summary(entry: Any) -> str:
+    title = str(getattr(entry, "title", "") or "").strip()
+    if " · " in title and " @ " in title:
+        name, rest = title.split(" · ", 1)
+        role, _, company = rest.partition(" @ ")
+        if name and role and company:
+            return f"Presales: outreach email to {name}, {role} at {company}"
+    if title:
+        return f"Presales: outreach email to {title}"
+    return "Presales: outreach email for review"
+
+
+def _load_presales_pending() -> list[PendingItem]:
+    try:
+        store = PresalesStore(enable_default_notifier=False)
+    except Exception:
+        return []
+    try:
+        items: list[PendingItem] = []
+        for status in PRESALES_PENDING_STATUSES:
+            for entry in store.list_by_status(status):
+                target = f" → {entry.target}" if entry.target else ""
+                flag = f" · {entry.flag}" if entry.flag else ""
+                items.append(
+                    PendingItem(
+                        agent_key="presales",
+                        agent_name=AGENT_BY_KEY["presales"].name,
+                        entry_id=entry.entry_id,
+                        status=entry.status,
+                        created_at=entry.created_at,
+                        title=f"{entry.title or 'outreach draft'}{target}{flag}",
+                        preview=_clip(entry.content),
+                        store="presales",
+                        summary=_presales_inbox_summary(entry),
+                        body=str(entry.content or ""),
+                        kind="presales_outreach",
+                    )
+                )
+        return items
+    finally:
+        store.close()
+
+
+def _load_techsupport_pending() -> list[PendingItem]:
+    try:
+        store = TechsupportStore(enable_default_notifier=False)
+    except Exception:
+        return []
+    try:
+        items: list[PendingItem] = []
+        for status in TECHSUPPORT_PENDING_STATUSES:
+            for entry in store.list_by_status(status):
+                target = f" → {entry.target}" if entry.target else ""
+                cite = f" · {entry.kb_citation}" if entry.kb_citation else ""
+                ticket = str(entry.title or "ticket")
+                items.append(
+                    PendingItem(
+                        agent_key="techsupport",
+                        agent_name=AGENT_BY_KEY["techsupport"].name,
+                        entry_id=entry.entry_id,
+                        status=entry.status,
+                        created_at=entry.created_at,
+                        title=f"{entry.title or 'support draft'}{target}{cite}",
+                        preview=_clip(entry.content),
+                        store="techsupport",
+                        summary=f"Tech Support: reply draft for {ticket}",
+                        body=str(entry.content or ""),
+                        kind="techsupport_reply",
+                    )
+                )
+        return items
+    finally:
+        store.close()
+
+
+def _load_legal_pending() -> list[PendingItem]:
+    try:
+        store = LegalStore(enable_default_notifier=False)
+    except Exception:
+        return []
+    try:
+        items: list[PendingItem] = []
+        for status in LEGAL_PENDING_STATUSES:
+            for entry in store.list_by_status(status):
+                target = f" → {entry.target}" if entry.target else ""
+                kind = f" · {entry.kind}" if entry.kind else ""
+                label = str(entry.kind or "compliance")
+                topic = str(entry.title or "review")
+                items.append(
+                    PendingItem(
+                        agent_key="legal",
+                        agent_name=AGENT_BY_KEY["legal"].name,
+                        entry_id=entry.entry_id,
+                        status=entry.status,
+                        created_at=entry.created_at,
+                        title=f"{entry.title or 'compliance draft'}{target}{kind}",
+                        preview=_clip(entry.content),
+                        store="legal",
+                        summary=f"Legal: {label} draft for {topic}",
+                        body=str(entry.content or ""),
+                        kind="legal_draft",
                     )
                 )
         return items
@@ -372,6 +576,10 @@ def _load_audit_pending() -> list[PendingItem]:
             or payload.get("proposed_patch")
             or str(payload)
         )
+        action = str(entry.get("action_type") or "audit entry")
+        short_name = AGENT_BY_KEY[key].name.replace(" Agent", "").replace(
+            " / Compliance", ""
+        )
         items.append(
             PendingItem(
                 agent_key=key,
@@ -379,16 +587,59 @@ def _load_audit_pending() -> list[PendingItem]:
                 entry_id=str(entry["id"]),
                 status=str(entry.get("status") or "pending_approval"),
                 created_at=str(entry.get("timestamp") or ""),
-                title=str(entry.get("action_type") or "audit entry"),
+                title=action,
                 preview=_clip(str(preview)),
                 store="audit",
+                summary=f"{short_name}: {action}",
+                body=str(preview),
+                kind="audit",
             )
         )
     return items
 
 
+def _load_pipeline_pending() -> list[PendingItem]:
+    """Needs-review cards from the marketing tracking board (weekly drafts)."""
+    try:
+        store = ContentPipelineStore()
+    except Exception:
+        return []
+    try:
+        items: list[PendingItem] = []
+        for row in store.list_by_stage(STAGE_NEEDS_REVIEW):
+            notes = str(row.notes or "")
+            items.append(
+                PendingItem(
+                    agent_key="marketing",
+                    agent_name=AGENT_BY_KEY["marketing"].name,
+                    entry_id=row.item_id,
+                    status=row.stage,
+                    created_at=row.created_at,
+                    title=row.title,
+                    preview=_clip(notes or row.title),
+                    store="pipeline",
+                    summary=f"Marketing: weekly content draft for review — {row.title}",
+                    body=notes or row.title,
+                    kind="pipeline_draft",
+                )
+            )
+        return items
+    except Exception:
+        return []
+    finally:
+        store.close()
+
+
 def load_pending_approvals() -> list[PendingItem]:
-    items = _load_coding_pending() + _load_marketing_pending() + _load_audit_pending()
+    items = (
+        _load_coding_pending()
+        + _load_marketing_pending()
+        + _load_presales_pending()
+        + _load_techsupport_pending()
+        + _load_legal_pending()
+        + _load_audit_pending()
+        + _load_pipeline_pending()
+    )
     items.sort(key=lambda item: item.created_at, reverse=True)
     return items
 
@@ -400,12 +651,103 @@ def pending_counts() -> dict[str, int]:
     return counts
 
 
+def is_marketing_brief_item(item: PendingItem) -> bool:
+    """True when a dashboard PendingItem is an assigned marketing brief, not copy."""
+    return item.store == "marketing" and item.kind == "marketing_brief"
+
+
+def _pipeline_channel_for_platform(platform: str) -> str:
+    mapping = {
+        "linkedin": "LinkedIn",
+        "twitter": "Twitter / X",
+        "devto": "Dev.to",
+        "reddit": "Reddit",
+        "hn": "Hacker News",
+        "indiehackers": "Indie Hackers",
+        "producthunt": "Product Hunt",
+    }
+    channel = mapping.get((platform or "").strip().lower(), "LinkedIn")
+    if channel not in PIPELINE_CHANNELS:
+        return "LinkedIn"
+    return channel
+
+
+def _mark_pipeline_ready(
+    item_id: str,
+    *,
+    pipeline_db: Optional[Path | str] = None,
+) -> None:
+    store = ContentPipelineStore(db_path=pipeline_db)
+    try:
+        store.update_item(item_id, stage=STAGE_READY_TO_POST)
+    finally:
+        store.close()
+
+
+def _upsert_pipeline_ready_card(
+    *,
+    title: str,
+    channel: str,
+    notes: str,
+    pipeline_db: Optional[Path | str] = None,
+) -> None:
+    store = ContentPipelineStore(db_path=pipeline_db)
+    try:
+        store.create_item(
+            title=title or "Approved draft",
+            channel=channel,
+            stage=STAGE_READY_TO_POST,
+            notes=notes or "",
+        )
+    finally:
+        store.close()
+
+
+def mark_ready_to_publish(
+    item: PendingItem,
+    *,
+    marketing_db: Optional[Path | str] = None,
+    pipeline_db: Optional[Path | str] = None,
+) -> None:
+    """Mark copy ready for the founder to post. Never calls a platform adapter."""
+    if item.store == "pipeline":
+        _mark_pipeline_ready(item.entry_id, pipeline_db=pipeline_db)
+        return
+    if item.store != "marketing":
+        raise ValueError("ready-to-publish applies to marketing drafts only")
+    store = MarketingStore(db_path=marketing_db, enable_default_notifier=False)
+    try:
+        entry = store.get_entry(item.entry_id)
+        if entry is None:
+            return
+        if is_marketing_brief(entry):
+            return
+        if entry.status == MARKETING_PENDING:
+            store.approve(item.entry_id)
+            entry = store.get_entry(item.entry_id) or entry
+        _upsert_pipeline_ready_card(
+            title=item.summary or item.title or f"{entry.platform} {entry.content_type}",
+            channel=_pipeline_channel_for_platform(entry.platform),
+            notes=entry.content or item.body or "",
+            pipeline_db=pipeline_db,
+        )
+    finally:
+        store.close()
+
+
 def approve_entry(
     item: PendingItem,
     *,
     coding_db: Optional[Path | str] = None,
     marketing_db: Optional[Path | str] = None,
+    presales_db: Optional[Path | str] = None,
+    techsupport_db: Optional[Path | str] = None,
+    legal_db: Optional[Path | str] = None,
+    pipeline_db: Optional[Path | str] = None,
 ) -> None:
+    if item.store == "pipeline":
+        _mark_pipeline_ready(item.entry_id, pipeline_db=pipeline_db)
+        return
     if item.store == "coding":
         store = CodingStore(db_path=coding_db, enable_default_notifier=False)
         kick_off = False
@@ -430,23 +772,73 @@ def approve_entry(
         if kick_off:
             submit_draft_job(item.entry_id, db_path=marketing_db)
         return
+    if item.store == "presales":
+        from agents.presales_agent.presales_agent import approve_draft
+
+        approve_draft(item.entry_id, db_path=presales_db)
+        return
+    if item.store == "techsupport":
+        from agents.techsupport_agent.techsupport_agent import approve_draft as approve_support
+
+        approve_support(item.entry_id, db_path=techsupport_db)
+        return
+    if item.store == "legal":
+        from agents.legal_compliance_agent.legal_compliance_agent import (
+            approve_draft as approve_legal,
+        )
+
+        approve_legal(item.entry_id, db_path=legal_db)
+        return
     update_audit_status(item.entry_id, STATUS_APPROVED, approved_by="dashboard")
 
 
-def reject_entry(item: PendingItem) -> None:
+def reject_entry(
+    item: PendingItem,
+    *,
+    coding_db: Optional[Path | str] = None,
+    marketing_db: Optional[Path | str] = None,
+    presales_db: Optional[Path | str] = None,
+    techsupport_db: Optional[Path | str] = None,
+    legal_db: Optional[Path | str] = None,
+    pipeline_db: Optional[Path | str] = None,
+) -> None:
+    if item.store == "pipeline":
+        store = ContentPipelineStore(db_path=pipeline_db)
+        try:
+            store.delete_item(item.entry_id)
+        finally:
+            store.close()
+        return
     if item.store == "coding":
-        store = CodingStore(enable_default_notifier=False)
+        store = CodingStore(db_path=coding_db, enable_default_notifier=False)
         try:
             store.update_status(item.entry_id, CODING_REJECTED)
         finally:
             store.close()
         return
     if item.store == "marketing":
-        store = MarketingStore(enable_default_notifier=False)
+        store = MarketingStore(db_path=marketing_db, enable_default_notifier=False)
         try:
             store.reject(item.entry_id)
         finally:
             store.close()
+        return
+    if item.store == "presales":
+        from agents.presales_agent.presales_agent import reject_draft
+
+        reject_draft(item.entry_id, db_path=presales_db)
+        return
+    if item.store == "techsupport":
+        from agents.techsupport_agent.techsupport_agent import reject_draft as reject_support
+
+        reject_support(item.entry_id, db_path=techsupport_db)
+        return
+    if item.store == "legal":
+        from agents.legal_compliance_agent.legal_compliance_agent import (
+            reject_draft as reject_legal,
+        )
+
+        reject_legal(item.entry_id, db_path=legal_db)
         return
     update_audit_status(item.entry_id, STATUS_REJECTED, approved_by="dashboard")
 
@@ -464,8 +856,23 @@ def _summarize_result(result: Any) -> str:
             f"failures={result.failures_detected} "
             f"ready={result.fixes_ready} blocked={result.blocked_for_review}"
         )
+    if hasattr(result, "findings") and hasattr(result, "dpdp_gaps"):
+        return (
+            f"findings={result.findings} drafted={result.drafted} "
+            f"gaps={result.dpdp_gaps}"
+        )
+    if hasattr(result, "ingested") and hasattr(result, "needs_review"):
+        return (
+            f"ingested={result.ingested} drafted={result.drafted} "
+            f"review={result.needs_review}"
+        )
     if isinstance(result, list):
         return f"queued {len(result)} draft(s)"
+    if hasattr(result, "queued") and hasattr(result, "scored"):
+        return (
+            f"scored={result.scored} queued={result.queued} "
+            f"skipped={getattr(result, 'skipped', 0)}"
+        )
     if isinstance(result, dict):
         errors = result.get("stage_errors") or []
         ok = [name for name, value in result.items() if name != "stage_errors" and value is not None]
@@ -1359,6 +1766,270 @@ def load_marketing_domain(
     )
 
 
+def _presales_activity_text(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "")
+    title = str(row.get("title") or "outreach draft")
+    if status == PRESALES_APPROVED:
+        return f"approved copy for {title}"
+    if status == PRESALES_REJECTED:
+        return f"rejected copy for {title}"
+    return f"queued outreach draft for {title}"
+
+
+def load_presales_domain(
+    db_path: Optional[Path | str],
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    del now, today_iso
+    latest = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, title
+        FROM pending_approval
+        ORDER BY created_at DESC, entry_id DESC
+        LIMIT 1
+        """,
+    )
+    last_ts = str(latest[0]["created_at"]) if latest else None
+    last_text = _presales_activity_text(latest[0]) if latest else ""
+    finished = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, title,
+               COALESCE(reviewed_at, created_at) AS action_ts
+        FROM pending_approval
+        WHERE status = ?
+        ORDER BY COALESCE(reviewed_at, created_at) DESC, entry_id DESC
+        LIMIT 1
+        """,
+        (PRESALES_APPROVED,),
+    )
+    if finished:
+        row = finished[0]
+        completed_ts = str(row.get("action_ts") or row["created_at"])
+        completed_text = _presales_activity_text(row)
+    else:
+        completed_ts = last_ts
+        completed_text = last_text
+    completed_week = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ? AND COALESCE(reviewed_at, created_at) >= ?
+        """,
+        (PRESALES_APPROVED, week_iso),
+    )
+    queued = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (PRESALES_PENDING, since_iso),
+    )
+    approved = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ? AND COALESCE(reviewed_at, created_at) >= ?
+        """,
+        (PRESALES_APPROVED, since_iso),
+    )
+    parts: list[str] = []
+    if approved:
+        parts.append(f"approved {approved} draft" + ("s" if approved != 1 else ""))
+    if queued and not approved:
+        parts.append(f"queued {queued} draft" + ("s" if queued != 1 else ""))
+    return DomainSnapshot(
+        last_ts=last_ts,
+        last_text=last_text,
+        completed_ts=completed_ts,
+        completed_text=completed_text,
+        completed_week=completed_week,
+        errors_week=0,
+        briefing_line=_join_phrases(
+            parts, "No new completed work since last session."
+        ),
+    )
+
+
+def _techsupport_activity_text(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "")
+    title = str(row.get("title") or "support draft")
+    if status == TECHSUPPORT_APPROVED:
+        return f"approved reply for {title}"
+    if status == TECHSUPPORT_REJECTED:
+        return f"rejected reply for {title}"
+    return f"queued support draft for {title}"
+
+
+def load_techsupport_domain(
+    db_path: Optional[Path | str],
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    del now, today_iso
+    latest = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, title
+        FROM pending_approval
+        ORDER BY created_at DESC, entry_id DESC
+        LIMIT 1
+        """,
+    )
+    last_ts = str(latest[0]["created_at"]) if latest else None
+    last_text = _techsupport_activity_text(latest[0]) if latest else ""
+    finished = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, title,
+               COALESCE(reviewed_at, created_at) AS action_ts
+        FROM pending_approval
+        WHERE status = ?
+        ORDER BY COALESCE(reviewed_at, created_at) DESC, entry_id DESC
+        LIMIT 1
+        """,
+        (TECHSUPPORT_APPROVED,),
+    )
+    if finished:
+        row = finished[0]
+        completed_ts = str(row.get("action_ts") or row["created_at"])
+        completed_text = _techsupport_activity_text(row)
+    else:
+        completed_ts = last_ts
+        completed_text = last_text
+    completed_week = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ? AND COALESCE(reviewed_at, created_at) >= ?
+        """,
+        (TECHSUPPORT_APPROVED, week_iso),
+    )
+    queued = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (TECHSUPPORT_PENDING, since_iso),
+    )
+    approved = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ? AND COALESCE(reviewed_at, created_at) >= ?
+        """,
+        (TECHSUPPORT_APPROVED, since_iso),
+    )
+    parts: list[str] = []
+    if approved:
+        parts.append(f"approved {approved} draft" + ("s" if approved != 1 else ""))
+    if queued and not approved:
+        parts.append(f"queued {queued} draft" + ("s" if queued != 1 else ""))
+    return DomainSnapshot(
+        last_ts=last_ts,
+        last_text=last_text,
+        completed_ts=completed_ts,
+        completed_text=completed_text,
+        completed_week=completed_week,
+        errors_week=0,
+        briefing_line=_join_phrases(
+            parts, "No new completed work since last session."
+        ),
+    )
+
+
+def _legal_activity_text(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "")
+    title = str(row.get("title") or "compliance draft")
+    if status == LEGAL_APPROVED:
+        return f"approved suggested language for {title}"
+    if status == LEGAL_REJECTED:
+        return f"rejected suggested language for {title}"
+    return f"queued compliance draft for {title}"
+
+
+def load_legal_domain(
+    db_path: Optional[Path | str],
+    *,
+    now: datetime,
+    since_iso: str,
+    week_iso: str,
+    today_iso: str,
+) -> DomainSnapshot:
+    del now, today_iso
+    latest = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, title
+        FROM pending_approval
+        ORDER BY created_at DESC, entry_id DESC
+        LIMIT 1
+        """,
+    )
+    last_ts = str(latest[0]["created_at"]) if latest else None
+    last_text = _legal_activity_text(latest[0]) if latest else ""
+    finished = _readonly_query(
+        db_path,
+        """
+        SELECT created_at, status, title,
+               COALESCE(reviewed_at, created_at) AS action_ts
+        FROM pending_approval
+        WHERE status = ?
+        ORDER BY COALESCE(reviewed_at, created_at) DESC, entry_id DESC
+        LIMIT 1
+        """,
+        (LEGAL_APPROVED,),
+    )
+    if finished:
+        row = finished[0]
+        completed_ts = str(row.get("action_ts") or row["created_at"])
+        completed_text = _legal_activity_text(row)
+    else:
+        completed_ts = last_ts
+        completed_text = last_text
+    completed_week = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ? AND COALESCE(reviewed_at, created_at) >= ?
+        """,
+        (LEGAL_APPROVED, week_iso),
+    )
+    queued = _count_sql(
+        db_path,
+        "SELECT COUNT(*) AS n FROM pending_approval WHERE status = ? AND created_at >= ?",
+        (LEGAL_PENDING, since_iso),
+    )
+    approved = _count_sql(
+        db_path,
+        """
+        SELECT COUNT(*) AS n FROM pending_approval
+        WHERE status = ? AND COALESCE(reviewed_at, created_at) >= ?
+        """,
+        (LEGAL_APPROVED, since_iso),
+    )
+    parts: list[str] = []
+    if approved:
+        parts.append(f"approved {approved} draft" + ("s" if approved != 1 else ""))
+    if queued and not approved:
+        parts.append(f"queued {queued} draft" + ("s" if queued != 1 else ""))
+    return DomainSnapshot(
+        last_ts=last_ts,
+        last_text=last_text,
+        completed_ts=completed_ts,
+        completed_text=completed_text,
+        completed_week=completed_week,
+        errors_week=0,
+        briefing_line=_join_phrases(
+            parts, "No new completed work since last session."
+        ),
+    )
+
+
 def load_competitor_domain(
     db_path: Optional[Path | str],
     *,
@@ -1585,6 +2256,9 @@ def _domain_for_agent(
         "marketing": (load_marketing_domain, paths.marketing),
         "competitor": (load_competitor_domain, paths.competitor),
         "research": (load_research_domain, paths.research),
+        "presales": (load_presales_domain, paths.presales),
+        "techsupport": (load_techsupport_domain, paths.techsupport),
+        "legal": (load_legal_domain, paths.legal),
     }
     loader, db_path = loaders[spec.key]
     return loader(
@@ -1786,6 +2460,19 @@ def assign_marketing_task(
         store.close()
 
 
+def assign_presales_task(
+    text: str,
+    *,
+    db_path: Optional[Path | str] = None,
+) -> str:
+    """Roster Assign wrapper — same pattern as assign_marketing_task."""
+    from agents.presales_agent.presales_agent import (
+        assign_presales_task as _assign_presales_task,
+    )
+
+    return _assign_presales_task(text, db_path=db_path)
+
+
 def assign_competitor_task(
     text: str,
     *,
@@ -1858,6 +2545,14 @@ def _render_roster_card(st: Any, card: RosterCard, *, key_prefix: str = "") -> N
                         elif card.assign_mode == "competitor":
                             label = assign_competitor_task(body)
                             st.success(f"Checking {label}…")
+                        elif card.assign_mode == "presales":
+                            label = assign_presales_task(body)
+                            st.success(f"Imported CSV ({label}). Drafts are not sent.")
+                        elif card.assign_mode == "run":
+                            submit_agent(card.key)
+                            st.success(
+                                f"Started {card.name} — drafts still go to pending_approval."
+                            )
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
@@ -1882,7 +2577,7 @@ def _render_roster_tab(st: Any, cards: list[RosterCard], briefing: MorningBriefi
             st.warning(
                 "Needs your attention: "
                 + ", ".join(briefing.attention)
-                + " — open the **Control** tab to review."
+                + " — open the **Home** tab to review."
             )
         else:
             st.caption("No new pending items since last visit.")
@@ -1892,8 +2587,9 @@ def _render_roster_tab(st: Any, cards: list[RosterCard], briefing: MorningBriefi
             st.caption("No agent has been stuck or erroring since before today.")
 
     st.header("Team Roster")
-    for pair in (cards[0:2], cards[2:4]):
-        columns = st.columns(2)
+    for i in range(0, len(cards), 2):
+        pair = cards[i : i + 2]
+        columns = st.columns(len(pair))
         for column, card in zip(columns, pair):
             with column:
                 _render_roster_card(st, card)
@@ -1911,17 +2607,22 @@ def render_pending_approvals(
         pending = [item for item in pending if item.agent_key == agent_key]
     if not pending:
         if agent_key is None:
-            st.success("No pending_approval items across the four agents.")
+            st.success("No pending_approval items across the agents.")
         else:
             st.success("No pending_approval items for this agent.")
         return
     for item in pending:
         with st.container(border=True):
+            summary = item.summary or item.title
             st.markdown(f"**{item.agent_name}** · `{item.status}` · `{item.entry_id}`")
-            st.caption(f"{item.title} · {item.created_at}")
-            if item.preview:
+            st.caption(f"{summary} · {item.created_at}")
+            marketing_draft = item.store in {"marketing", "pipeline"} and item.kind != "marketing_brief"
+            if marketing_draft and (item.body or item.preview):
+                st.markdown("**Full draft**")
+                st.text(item.body or item.preview)
+            elif item.preview:
                 st.code(item.preview, language=None)
-            actions = st.columns([1, 1, 6])
+            actions = st.columns([1, 1, 1.6, 5])
             with actions[0]:
                 if st.button(
                     "Approve",
@@ -1936,11 +2637,19 @@ def render_pending_approvals(
                 ):
                     reject_entry(item)
                     st.rerun()
+            with actions[2]:
+                if marketing_draft and st.button(
+                    "Ready to publish",
+                    key=f"{key_prefix}ready-{item.store}-{item.entry_id}",
+                    help="Mark copy ready for you to post. Does not publish.",
+                ):
+                    mark_ready_to_publish(item)
+                    st.rerun()
 
 
 def _render_control_tab(st: Any) -> None:
     cards = load_agent_statuses()
-    columns = st.columns(4)
+    columns = st.columns(len(cards) or 1)
     for column, card in zip(columns, cards):
         with column:
             st.subheader(card["name"])
@@ -1992,9 +2701,30 @@ def render() -> None:
     visit_cutoff = begin_dashboard_visit(now, st.session_state)
     roster_cards = load_roster_cards(now=now, visit_cutoff=visit_cutoff)
     briefing = build_morning_briefing(roster_cards)
-    tab_roster, tab_control, tab_pipeline = st.tabs(
-        ["Roster", "Control", "Content Pipeline"]
+    pending = load_pending_approvals()
+    (
+        tab_home,
+        tab_roster,
+        tab_control,
+        tab_pipeline,
+        tab_presales,
+        tab_techsupport,
+        tab_legal,
+    ) = st.tabs(
+        [
+            "Home",
+            "Roster",
+            "Control",
+            "Content Pipeline",
+            "Pre-Sales",
+            "Tech Support",
+            "Legal",
+        ]
     )
+    with tab_home:
+        from home_view import render_home_tab
+
+        render_home_tab(st, pending, key_prefix="dash-home-")
     with tab_roster:
         _render_roster_tab(st, roster_cards, briefing)
     with tab_control:
@@ -2003,6 +2733,18 @@ def render() -> None:
         from content_pipeline import render_pipeline_tab
 
         render_pipeline_tab(st)
+    with tab_presales:
+        from agents.presales_agent.tab import render_presales_tab
+
+        render_presales_tab(st)
+    with tab_techsupport:
+        from agents.techsupport_agent.tab import render_techsupport_tab
+
+        render_techsupport_tab(st)
+    with tab_legal:
+        from agents.legal_compliance_agent.tab import render_legal_tab
+
+        render_legal_tab(st)
 
     if auto or any_agent_running():
         time.sleep(REFRESH_SECONDS)

@@ -144,9 +144,10 @@ class FixValidationLoop:
             ),
             diff=proposal.diff,
             regression_test=proposal.regression_test,
-            test_results=_test_results_json(test_result, diagnosis),
+            test_results=_test_results_json(test_result, diagnosis, proposal),
             retries_used=retries_used,
             status=STATUS_READY_FOR_APPROVAL,
+            generation_mode=getattr(proposal, "generation_mode", "api") or "api",
         )
 
     def _create_failed_entry(
@@ -183,13 +184,36 @@ class FixValidationLoop:
                 "signature_hash": diagnosis.signature_hash,
                 "error_type": diagnosis.error_type,
                 "relevant_file": diagnosis.relevant_file,
+                "generation_mode": (
+                    getattr(proposal, "generation_mode", "api") if proposal else "api"
+                ),
+                "source_note": (
+                    "Generated via fallback heuristics"
+                    if proposal is not None
+                    and getattr(proposal, "generation_mode", "api") == "fallback"
+                    else "Generated via API"
+                ),
             },
             retries_used=retries_used,
             status=STATUS_AUTO_FIX_FAILED,
+            generation_mode=(
+                getattr(proposal, "generation_mode", "api") if proposal else "api"
+            )
+            or "api",
         )
 
 
-def _test_results_json(test_result: TestResult, diagnosis: DiagnosisResult) -> dict[str, Any]:
+def _test_results_json(
+    test_result: TestResult,
+    diagnosis: DiagnosisResult,
+    proposal=None,
+) -> dict[str, Any]:
+    mode = getattr(proposal, "generation_mode", "api") if proposal else "api"
+    source_note = (
+        "Generated via fallback heuristics"
+        if mode == "fallback"
+        else "Generated via API"
+    )
     return {
         "passed": test_result.passed,
         "output": test_result.output,
@@ -198,6 +222,8 @@ def _test_results_json(test_result: TestResult, diagnosis: DiagnosisResult) -> d
         "signature_hash": diagnosis.signature_hash,
         "error_type": diagnosis.error_type,
         "relevant_file": diagnosis.relevant_file,
+        "generation_mode": mode,
+        "source_note": source_note,
     }
 
 
@@ -220,6 +246,10 @@ def _load_error_message(
     for call in storage.get_calls_for_session(diagnosis.session_id):
         if int(call["id"]) == int(diagnosis.failed_call_id):
             return call.get("error_message")
+    # Path B synthetic diagnoses use a negative failed_call_id and have no
+    # StreamCtx session row. Path A (positive ids) still returns None here.
+    if int(diagnosis.failed_call_id) < 0 and diagnosis.reason:
+        return diagnosis.reason
     return None
 
 

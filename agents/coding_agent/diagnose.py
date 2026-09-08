@@ -2,21 +2,49 @@
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from streamctx.attribution import AttributionEngine, AttributionResult
-from streamctx.replay import CounterfactualReplayer
 from streamctx.storage import SessionStorage, get_storage
 
+try:
+    from streamctx.replayer import CounterfactualReplayer
+except ModuleNotFoundError:  # streamctx < 0.4.7 still exports replay.py
+    from streamctx.replay import CounterfactualReplayer
+
+from agents.coding_agent.auto_repair_gate import (
+    ConfidenceGate,
+    DISPOSITION_REJECT,
+    audit_message,
+)
 from agents.coding_agent.failure_detector import poll_failed_calls
+from agents.coding_agent.fallback_candidates import LocalFallbackGenerator
 from agents.coding_agent.fix_patterns import FixPatternStore
 from agents.coding_agent.models import (
+    DiagnoseProposeResult,
     DiagnosisResult,
     FailedCallRecord,
+    FixCandidate,
     FixPatternMatch,
+    PendingApprovalEntry,
     RootCauseType,
 )
+from agents.coding_agent.pending_approval import (
+    STATUS_AUTO_APPLIED,
+    STATUS_READY_FOR_APPROVAL,
+    STATUS_REJECTED,
+    PendingApprovalStore,
+    VERIFICATION_PENDING,
+)
+from agents.coding_agent.retry_engine import APIRetryHandler
+from shared.audit_log import log_action
+from shared.config import AGENT_IDS, STATUS_APPROVED, STATUS_PENDING
+from shared.config import STATUS_REJECTED as AUDIT_REJECTED
+
+MAX_API_ATTEMPTS = 3
+API_ATTESTATION = "OpenRouter API"
 
 ROOT_CAUSE_SIGNALS = ("drift", "compression", "recency")
 
@@ -32,6 +60,8 @@ class FailureDiagnostician:
         attribution_engine: Optional[AttributionEngine] = None,
         replayer: Optional[CounterfactualReplayer] = None,
         pattern_store: Optional[FixPatternStore] = None,
+        approval_store: Optional[PendingApprovalStore] = None,
+        auto_repair_gate: Optional[ConfidenceGate] = None,
     ) -> None:
         self.storage = storage or get_storage()
         self.attribution_engine = attribution_engine or AttributionEngine(
@@ -39,6 +69,8 @@ class FailureDiagnostician:
         )
         self.replayer = replayer or CounterfactualReplayer(storage=self.storage)
         self.pattern_store = pattern_store or FixPatternStore()
+        self.approval_store = approval_store
+        self.auto_repair_gate = auto_repair_gate or ConfidenceGate()
 
     def run(
         self,
@@ -171,6 +203,389 @@ class FailureDiagnostician:
             replay_messages=replay.counterfactual_messages,
             original_messages=replay.original_messages,
         )
+
+    def diagnose_and_propose(
+        self,
+        failure: FailedCallRecord,
+        *,
+        code_context: str = "",
+        error_message: Optional[str] = None,
+        api_fn: Optional[Callable[..., list[FixCandidate]]] = None,
+        stream_fn: Optional[Callable[..., Iterator[Any]]] = None,
+        retry_handler: Optional[APIRetryHandler] = None,
+        fallback_gen: Optional[LocalFallbackGenerator] = None,
+        approval_store: Optional[PendingApprovalStore] = None,
+        auto_repair_gate: Optional[ConfidenceGate] = None,
+    ) -> DiagnoseProposeResult:
+        """Diagnose a failure, then propose fix candidates with retry + fallback.
+
+        Flow: diagnose → OpenRouter (up to 3 retries + backoff) → local
+        heuristics if the API stays unavailable → dry-run verify →
+        auto-apply when confidence is high. Auth / malformed errors
+        fail hard instead of falling back.
+        """
+        diagnosis = self.diagnose_failure(failure)
+        message = (
+            error_message
+            if error_message is not None
+            else (failure.error_message or "")
+        )
+        context = code_context or _messages_as_context(failure)
+        retry_handler = retry_handler or APIRetryHandler()
+        fallback_gen = fallback_gen or LocalFallbackGenerator()
+        error_type = diagnosis.error_type
+        failed_call_id = str(failure.call_id)
+        session_id = str(failure.session_id)
+        is_stream = stream_fn is not None
+        fix_candidates: Optional[list[FixCandidate]] = None
+        final_mode = "api"
+
+        for attempt in range(1, MAX_API_ATTEMPTS + 1):
+            try:
+                if is_stream:
+                    response_stream = stream_fn(
+                        failed_call_id, error_type, context, session_id
+                    )
+                    fix_text, _tokens = retry_handler.checkpoint_streaming_output(
+                        response_stream,
+                        checkpoint_id=failed_call_id,
+                    )
+                    fix_candidates = parse_candidates_from_text(
+                        fix_text,
+                        failed_call_id=failed_call_id,
+                        error_type=error_type,
+                    )
+                elif api_fn is not None:
+                    fix_candidates = api_fn(
+                        failed_call_id, error_type, context, session_id
+                    )
+                else:
+                    fix_candidates = call_openrouter_for_fix_candidates(
+                        failed_call_id,
+                        error_type,
+                        context,
+                        session_id,
+                        error_message=message,
+                    )
+                break
+            except Exception as exc:
+                if not retry_handler.should_retry(exc):
+                    raise
+                if attempt < MAX_API_ATTEMPTS:
+                    retry_handler.wait_and_retry(attempt, str(exc))
+                    continue
+                fix_candidates = fallback_gen.generate_heuristic_fixes(
+                    error_type=error_type,
+                    error_message=message,
+                    code_context=context,
+                    failed_call_id=failed_call_id,
+                )
+                final_mode = "fallback"
+                break
+
+        if fix_candidates is None:
+            fix_candidates = []
+
+        source_note = (
+            "Generated via fallback heuristics"
+            if final_mode == "fallback"
+            else "Generated via API"
+        )
+        gate = auto_repair_gate or self.auto_repair_gate
+        store = approval_store or self.approval_store
+        best = _best_candidate(fix_candidates)
+        dry_run_passed = (
+            self._dry_run_verify_candidate(failure, best) if best else False
+        )
+        confidence = best.confidence if best else 0.0
+        decision = gate.decide(confidence, dry_run_passed)
+        auto_applied = False
+        if decision.auto_apply and best is not None:
+            auto_applied = bool(
+                gate.apply_fix_autonomously(best, context, session_id)
+            )
+        disposition = (
+            decision.disposition
+            if auto_applied or not decision.auto_apply
+            else "pending"
+        )
+        message_text = audit_message(
+            auto_applied=auto_applied,
+            candidate_source=final_mode,
+            confidence=confidence,
+            dry_run_passed=dry_run_passed,
+            disposition=disposition,
+        )
+        audit_status = (
+            STATUS_APPROVED
+            if auto_applied
+            else (
+                AUDIT_REJECTED
+                if disposition == DISPOSITION_REJECT
+                else STATUS_PENDING
+            )
+        )
+        audit_entry = {
+            "mode": final_mode,
+            "candidates_count": len(fix_candidates),
+            "confidence_boost": (
+                "degraded" if final_mode == "fallback" else "normal"
+            ),
+            "source_note": source_note,
+            "generation_mode": final_mode,
+            "failed_call_id": failure.call_id,
+            "auto_apply": decision.auto_apply,
+            "auto_applied": auto_applied,
+            "dry_run_passed": dry_run_passed,
+            "verification_mode": decision.verification_mode,
+            "candidate_source": final_mode,
+            "message": message_text,
+        }
+        pending_entry = None
+        if store is not None:
+            pending_entry = _record_auto_repair_entry(
+                store,
+                diagnosis=diagnosis,
+                candidate=best,
+                generation_mode=final_mode,
+                auto_applied=auto_applied,
+                verification_mode=decision.verification_mode,
+                disposition=disposition,
+            )
+        logged = log_action(
+            AGENT_IDS["coding"],
+            session_id,
+            "fix_candidates",
+            {
+                **audit_entry,
+                "candidates": [
+                    {
+                        "candidate_code": item.candidate_code,
+                        "confidence": item.confidence,
+                        "reason": item.reason,
+                        "attestation": item.attestation,
+                    }
+                    for item in fix_candidates
+                ],
+            },
+            status=audit_status,
+        )
+        audit_entry["id"] = logged.get("id")
+        return DiagnoseProposeResult(
+            diagnosis=diagnosis,
+            candidates=list(fix_candidates),
+            generation_mode=final_mode,
+            audit_entry=audit_entry,
+            auto_apply=decision.auto_apply,
+            auto_applied=auto_applied,
+            dry_run_passed=dry_run_passed,
+            verification_mode=decision.verification_mode,
+            pending_entry=pending_entry,
+        )
+
+    def _dry_run_verify_candidate(
+        self,
+        failure: FailedCallRecord,
+        candidate: FixCandidate,
+    ) -> bool:
+        """Replay the failed step with the candidate injected (no LLM calls)."""
+        try:
+            from_step = _resolve_replay_step(
+                self.storage, failure.session_id, failure.call_id
+            )
+            if from_step is None:
+                return False
+            replay = self.replayer.replay(
+                session_id=failure.session_id,
+                from_step=from_step,
+                with_context={
+                    "role": "assistant",
+                    "content": (
+                        "Proposed fix candidate:\n"
+                        f"{candidate.candidate_code}"
+                    ),
+                },
+                dry_run=True,
+            )
+            if not replay.original_messages:
+                return False
+            if not replay.counterfactual_messages:
+                return False
+            return True
+        except Exception:
+            return False
+
+
+def _best_candidate(candidates: list[FixCandidate]) -> Optional[FixCandidate]:
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.confidence)
+
+
+def _record_auto_repair_entry(
+    store: PendingApprovalStore,
+    *,
+    diagnosis: DiagnosisResult,
+    candidate: Optional[FixCandidate],
+    generation_mode: str,
+    auto_applied: bool,
+    verification_mode: str,
+    disposition: str,
+) -> Optional[PendingApprovalEntry]:
+    existing = store.get_by_failed_call_id(diagnosis.failed_call_id)
+    if existing is not None:
+        return existing
+    if auto_applied:
+        status = STATUS_AUTO_APPLIED
+    elif disposition == DISPOSITION_REJECT:
+        status = STATUS_REJECTED
+    else:
+        status = STATUS_READY_FOR_APPROVAL
+    return store.create_entry(
+        session_id=str(diagnosis.session_id),
+        root_cause=diagnosis.root_cause,
+        confidence=(
+            candidate.confidence if candidate is not None else diagnosis.confidence
+        ),
+        matched_pattern_id=(
+            diagnosis.matched_pattern.signature_hash
+            if diagnosis.matched_pattern
+            else None
+        ),
+        diff=candidate.candidate_code if candidate is not None else None,
+        regression_test=None,
+        test_results={
+            "failed_call_id": diagnosis.failed_call_id,
+            "error_type": diagnosis.error_type,
+            "relevant_file": diagnosis.relevant_file,
+            "signature_hash": diagnosis.signature_hash,
+            "replay_verified": diagnosis.replay_verified,
+            "auto_applied": auto_applied,
+            "verification_mode": verification_mode or VERIFICATION_PENDING,
+            "generation_mode": generation_mode,
+        },
+        retries_used=0,
+        status=status,
+        generation_mode=generation_mode,
+        auto_applied=auto_applied,
+        verification_mode=verification_mode or VERIFICATION_PENDING,
+    )
+
+
+def parse_candidates_from_text(
+    text: str,
+    *,
+    failed_call_id: str,
+    error_type: str,
+) -> list[FixCandidate]:
+    """Parse an LLM JSON payload into ``FixCandidate`` rows."""
+    payload = _extract_json_payload(text)
+    raw_items: list[Any]
+    if isinstance(payload, list):
+        raw_items = payload
+    elif isinstance(payload, dict):
+        items = payload.get("candidates", payload.get("fixes"))
+        if isinstance(items, list):
+            raw_items = items
+        else:
+            raw_items = [payload]
+    else:
+        raise ValueError("Fix candidate payload must be a JSON object or list.")
+
+    candidates: list[FixCandidate] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        code = str(
+            item.get("candidate_code") or item.get("code") or item.get("diff") or ""
+        ).strip()
+        if not code:
+            continue
+        confidence = float(item.get("confidence") or 0.7)
+        candidates.append(
+            FixCandidate(
+                candidate_code=code,
+                confidence=confidence,
+                reason=str(item.get("reason") or "OpenRouter candidate"),
+                attestation=str(item.get("attestation") or API_ATTESTATION),
+                error_type=str(item.get("error_type") or error_type),
+                failed_call_id=str(item.get("failed_call_id") or failed_call_id),
+                generation_mode="api",
+            )
+        )
+    if not candidates:
+        raise ValueError("Fix candidate JSON produced no usable candidates.")
+    return candidates
+
+
+def call_openrouter_for_fix_candidates(
+    failed_call_id: str,
+    error_type: str,
+    code_context: str,
+    session_id: str,
+    *,
+    error_message: str = "",
+) -> list[FixCandidate]:
+    """Ask OpenRouter for structured fix candidates (non-streaming)."""
+    from openai import OpenAI
+
+    from shared.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL
+
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("invalid api key: OPENROUTER_API_KEY is required")
+
+    client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
+    response = client.chat.completions.create(
+        model=OPENROUTER_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a careful Python bug-fixing assistant. "
+                    "Respond with JSON only: "
+                    '{"candidates": [{"candidate_code": "...", '
+                    '"confidence": 0.0, "reason": "..."}]} '
+                    "Each candidate_code must be a 2-4 line snippet."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"failed_call_id={failed_call_id}\n"
+                    f"session_id={session_id}\n"
+                    f"error_type={error_type}\n"
+                    f"error_message={error_message}\n"
+                    f"code_context:\n{code_context}"
+                ),
+            },
+        ],
+        response_format={"type": "json_object"},
+    )
+    raw = response.choices[0].message.content or "{}"
+    return parse_candidates_from_text(
+        raw,
+        failed_call_id=str(failed_call_id),
+        error_type=error_type,
+    )
+
+
+def _extract_json_payload(raw: str) -> Any:
+    text = (raw or "").strip()
+    fence = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+    return json.loads(text)
+
+
+def _messages_as_context(failure: FailedCallRecord) -> str:
+    if not failure.messages:
+        return failure.error_message or ""
+    parts: list[str] = []
+    for message in failure.messages:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        parts.append(f"{role}: {content}")
+    return "\n".join(parts)
 
 
 def extract_error_type(error_message: Optional[str]) -> str:

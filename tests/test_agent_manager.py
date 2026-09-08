@@ -64,6 +64,36 @@ def test_classify_langfuse_pricing_as_competitor():
     assert result.agent == "competitor"
 
 
+def test_classify_sales_navigator_as_presales():
+    result = classify_command("import the sales navigator csv")
+    assert result.agent == "presales"
+
+
+def test_classify_presales_keywords():
+    assert classify_command("presales").agent == "presales"
+    assert classify_command("csv import").agent == "presales"
+    assert classify_command("score these leads").agent == "presales"
+    assert classify_command("queue outreach drafts").agent == "presales"
+
+
+def test_classify_support_ticket_as_techsupport():
+    assert classify_command("support").agent == "techsupport"
+    assert classify_command("ticket").agent == "techsupport"
+    assert classify_command("github issue").agent == "techsupport"
+    assert classify_command("discord").agent == "techsupport"
+    assert classify_command("tech support agent").agent == "techsupport"
+
+
+def test_classify_dpdp_privacy_terms_as_legal():
+    assert classify_command("legal").agent == "legal"
+    assert classify_command("compliance").agent == "legal"
+    assert classify_command("dpdp").agent == "legal"
+    assert classify_command("privacy").agent == "legal"
+    assert classify_command("terms").agent == "legal"
+    assert classify_command("legal agent").agent == "legal"
+    assert classify_command("privacy policy").agent == "legal"
+
+
 def test_classify_empty_and_vague_are_unclassified():
     assert classify_command("").agent == UNCLASSIFIED
     assert classify_command("please handle this").agent == UNCLASSIFIED
@@ -112,6 +142,75 @@ def test_dispatch_coding_run_starts_pipeline(monkeypatch):
     result = dispatch_command("coding", "run pipeline")
     assert result.action == "run"
     assert called["run"] == "coding"
+
+
+def test_dispatch_presales_run_starts_agent(monkeypatch):
+    monkeypatch.setattr(
+        "agent_manager.log_action",
+        lambda *args, **kwargs: {"id": "audit-ps"},
+    )
+    called = {}
+    monkeypatch.setattr(
+        "agent_manager.submit_agent",
+        lambda key: called.setdefault("run", key),
+    )
+    result = dispatch_command("presales", "run")
+    assert result.action == "run"
+    assert called["run"] == "presales"
+    assert "Nothing is sent" in result.message
+
+
+def test_dispatch_presales_csv_uses_assign_presales_task(monkeypatch):
+    monkeypatch.setattr(
+        "agent_manager.log_action",
+        lambda *args, **kwargs: {"id": "audit-ps-csv"},
+    )
+    monkeypatch.setattr(
+        "agent_manager.assign_presales_task",
+        lambda text: "imported=3 updated=0 skipped=0",
+    )
+    called = {}
+    monkeypatch.setattr(
+        "agent_manager.submit_agent",
+        lambda key: called.setdefault("run", key),
+    )
+    result = dispatch_command("presales", r"C:\data\leads.csv")
+    assert result.action == "import"
+    assert "imported=3" in result.message
+    assert "run" not in called
+
+
+def test_dispatch_techsupport_run_starts_agent(monkeypatch):
+    monkeypatch.setattr(
+        "agent_manager.log_action",
+        lambda *args, **kwargs: {"id": "audit-ts"},
+    )
+    called = {}
+    monkeypatch.setattr(
+        "agent_manager.submit_agent",
+        lambda key: called.setdefault("run", key),
+    )
+    result = dispatch_command("techsupport", "run")
+    assert result.action == "poll"
+    assert called["run"] == "techsupport"
+    assert "Nothing is posted" in result.message
+
+
+def test_dispatch_legal_run_starts_agent(monkeypatch):
+    monkeypatch.setattr(
+        "agent_manager.log_action",
+        lambda *args, **kwargs: {"id": "audit-lc"},
+    )
+    called = {}
+    monkeypatch.setattr(
+        "agent_manager.submit_agent",
+        lambda key: called.setdefault("run", key),
+    )
+    result = dispatch_command("legal", "run")
+    assert result.action == "scan"
+    assert called["run"] == "legal"
+    assert "Nothing is published" in result.message
+    assert "Not legal advice" in result.message
 
 
 def test_dispatch_research_routes_to_poll_not_assign(monkeypatch):
@@ -207,6 +306,8 @@ def test_agent_manager_wires_existing_uis_not_rebuilds():
     assert "render_pipeline_tab" in src
     assert "render_roster_card" in src
     assert "render_pending_approvals" in src
+    assert "render_unified_inbox" in src
+    assert "load_pending_approvals" in src
     assert "assign_fix" in src
     assert "ConfidenceGate.evaluate()" in src
     assert "FixValidationLoop.run()" in src
@@ -220,14 +321,24 @@ def test_agent_manager_wires_existing_uis_not_rebuilds():
     assert "BACKLOG.md" in src
     assert "Directed Assign/synthesis is disabled" in src
     assert "Langfuse" in src
+    assert "assign_presales_task" in src
+    assert "from agents.presales_agent.presales_agent import assign_presales_task" in src
+    assert "assign_presales_task," not in src.split("from dashboard import")[1].split(")")[0]
+    assert "render_techsupport_tab" in src
+    assert "techsupport_agent.run()" in src
+    assert "render_legal_tab" in src
+    assert "legal_compliance_agent.run()" in src
 
 
 def test_dashboard_exports_shared_renderers():
+    from dashboard import assign_presales_task
+
     assert callable(render_roster_card)
     assert callable(render_pending_approvals)
+    assert callable(assign_presales_task)
 
 
-def test_streamlit_home_shows_command_bar_and_four_tiles():
+def test_streamlit_home_shows_command_bar_and_seven_tiles():
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file("agent_manager.py", default_timeout=20)
@@ -239,12 +350,26 @@ def test_streamlit_home_shows_command_bar_and_four_tiles():
     assert "Marketing Agent" in body
     assert "Research Agent" in body
     assert "Competitor Agent" in body
+    assert "Pre-Sales Agent" in body
+    assert "Tech Support Agent" in body
+    assert "Legal / Compliance Agent" in body
     labels = [button.label for button in at.button]
     assert "Open Coding Agent" in labels
     assert "Open Marketing Agent" in labels
     assert "Open Research Agent" in labels
     assert "Open Competitor Agent" in labels
+    assert "Open Pre-Sales Agent" in labels
+    assert "Open Tech Support Agent" in labels
+    assert "Open Legal / Compliance Agent" in labels
     assert any(inp.label == "Command" for inp in at.text_input)
+    assert "drafts outreach from CSV leads" in body
+    assert "answers support tickets from GitHub/Discord" in body
+    assert "reviews legal/compliance docs and drafts DPDP checklist" in body
+    assert "pending_approval:" in body
+    assert "Pending approval" in body
+    assert "Today" in body
+    assign_inputs = [inp for inp in at.text_input if inp.label == "Assign a task"]
+    assert len(assign_inputs) == 7
 
 
 def test_unclassified_command_shows_manual_picker():
@@ -265,6 +390,9 @@ def test_unclassified_command_shows_manual_picker():
     assert "Marketing" in labels
     assert "Research" in labels
     assert "Competitor" in labels
+    assert "Pre-Sales" in labels
+    assert "Tech Support" in labels
+    assert "Legal / Compliance" in labels
 
 
 def test_coding_tile_opens_existing_fix_flow_and_dogfood_tabs():
@@ -329,7 +457,9 @@ def test_research_tile_opens_poll_view_without_assign_box():
     enabled_assign = [
         inp
         for inp in at.text_input
-        if inp.label == "Assign a task" and not getattr(inp, "disabled", False)
+        if inp.label == "Assign a task"
+        and not getattr(inp, "disabled", False)
+        and "research" in str(getattr(inp, "form_id", "") or "")
     ]
     assert not enabled_assign
 
@@ -348,3 +478,66 @@ def test_competitor_tile_opens_assign_v1_and_langfuse_dedup():
     labels = [button.label for button in at.button]
     assert "Run full snapshot poll" in labels
     assert any(inp.label == "Command · Competitor Agent" for inp in at.text_input)
+
+
+def test_presales_tile_opens_existing_tab():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("agent_manager.py", default_timeout=20)
+    at.run()
+    next(button for button in at.button if button.label == "Open Pre-Sales Agent").click().run()
+    assert not at.exception
+    body = _ui_text(at)
+    assert "Pre-Sales" in body
+    assert "Draft only" in body or "drafts outreach from CSV leads" in body
+    assert "pending_approval" in body.lower() or "Nothing is sent" in body or "not sent" in body.lower()
+    labels = [button.label for button in at.button]
+    assert "← All agents" in labels
+    assert any(inp.label == "Command · Pre-Sales Agent" for inp in at.text_input)
+    src = Path("agent_manager.py").read_text(encoding="utf-8")
+    assert "from agents.presales_agent.tab import render_presales_tab" in src
+    assert "render_presales_tab(st" in src
+
+
+def test_techsupport_tile_opens_real_tab():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("agent_manager.py", default_timeout=20)
+    at.run()
+    next(
+        button for button in at.button if button.label == "Open Tech Support Agent"
+    ).click().run()
+    assert not at.exception
+    body = _ui_text(at)
+    assert "Tech Support" in body
+    assert "Draft only" in body or "answers support tickets from GitHub/Discord" in body
+    assert "Needs Manual Review" in body
+    assert "Pending Approval" in body
+    labels = [button.label for button in at.button]
+    assert "← All agents" in labels
+    assert any(inp.label == "Command · Tech Support Agent" for inp in at.text_input)
+    src = Path("agent_manager.py").read_text(encoding="utf-8")
+    assert "from agents.techsupport_agent.tab import render_techsupport_tab" in src
+    assert "render_techsupport_tab(st" in src
+
+
+def test_legal_tile_opens_real_tab():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("agent_manager.py", default_timeout=20)
+    at.run()
+    next(
+        button for button in at.button if button.label == "Open Legal / Compliance Agent"
+    ).click().run()
+    assert not at.exception
+    body = _ui_text(at)
+    assert "Legal" in body
+    assert "Draft only" in body or "reviews legal/compliance docs" in body
+    assert "DPDP" in body
+    assert "Pending Approval" in body
+    labels = [button.label for button in at.button]
+    assert "← All agents" in labels
+    assert any(inp.label == "Command · Legal / Compliance Agent" for inp in at.text_input)
+    src = Path("agent_manager.py").read_text(encoding="utf-8")
+    assert "from agents.legal_compliance_agent.tab import render_legal_tab" in src
+    assert "render_legal_tab(st" in src

@@ -202,7 +202,10 @@ def test_marketing_agent_entry_points_unchanged():
     dashboard_src = (
         Path(__file__).resolve().parents[1] / "dashboard.py"
     ).read_text(encoding="utf-8")
-    assert '["Roster", "Control", "Content Pipeline"]' in dashboard_src
+    assert '"Home"' in dashboard_src
+    assert '"Roster"' in dashboard_src
+    assert '"Content Pipeline"' in dashboard_src
+    assert "render_home_tab" in dashboard_src
     assert "render_pipeline_tab" in dashboard_src
     assert 'marketing_agent.run' in dashboard_src
     assert 'assign_mode == "marketing"' in dashboard_src

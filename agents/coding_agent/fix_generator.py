@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from agents.coding_agent.fallback_candidates import LocalFallbackGenerator
 from agents.coding_agent.models import DiagnosisResult, FixProposal, FixRequest
+from agents.coding_agent.retry_engine import APIRetryHandler
+
+MAX_API_ATTEMPTS = 3
 
 FixGeneratorFn = Callable[[FixRequest], FixProposal]
 
@@ -27,9 +31,13 @@ class FixGenerator:
         self,
         llm_fn: Optional[FixGeneratorFn] = None,
         config: Optional[FixGeneratorConfig] = None,
+        retry_handler: Optional[APIRetryHandler] = None,
+        fallback_gen: Optional[LocalFallbackGenerator] = None,
     ) -> None:
         self._llm_fn = llm_fn
         self._config = config
+        self._retry_handler = retry_handler
+        self._fallback_gen = fallback_gen
 
     def generate(self, request: FixRequest) -> FixProposal:
         if request.pattern_template and request.attempt == 0:
@@ -42,7 +50,27 @@ class FixGenerator:
         if self._llm_fn is not None:
             return self._llm_fn(request)
 
-        return self._call_llm(request)
+        return self._call_llm_with_retry(request)
+
+    def _call_llm_with_retry(self, request: FixRequest) -> FixProposal:
+        retry_handler = self._retry_handler or APIRetryHandler()
+        fallback_gen = self._fallback_gen or LocalFallbackGenerator()
+        for attempt in range(1, MAX_API_ATTEMPTS + 1):
+            try:
+                proposal = self._call_llm(request)
+                return FixProposal(
+                    diff=proposal.diff,
+                    regression_test=proposal.regression_test,
+                    regression_test_path=proposal.regression_test_path,
+                    generation_mode="api",
+                )
+            except Exception as exc:
+                if not retry_handler.should_retry(exc):
+                    raise
+                if attempt < MAX_API_ATTEMPTS:
+                    retry_handler.wait_and_retry(attempt, str(exc))
+                    continue
+                return _proposal_from_fallback(request, fallback_gen)
 
     def _call_llm(self, request: FixRequest) -> FixProposal:
         config = self._config or _load_default_config()
@@ -184,6 +212,71 @@ def _extract_json(raw: str) -> dict[str, Any]:
     if fence:
         text = fence.group(1)
     return json.loads(text)
+
+
+def _proposal_from_fallback(
+    request: FixRequest,
+    fallback_gen: LocalFallbackGenerator,
+) -> FixProposal:
+    context = next(iter(request.source_contents.values()), "")[:2000]
+    candidates = fallback_gen.generate_heuristic_fixes(
+        error_type=request.diagnosis.error_type,
+        error_message=request.error_message,
+        code_context=context,
+        failed_call_id=str(request.diagnosis.failed_call_id),
+    )
+    snippet = (
+        candidates[0].candidate_code
+        if candidates
+        else "logging.exception('fallback handler')"
+    )
+    rel = (request.diagnosis.relevant_file or "unknown.py").replace("\\", "/")
+    original = request.source_contents.get(rel, "")
+    header = "# Generated via fallback heuristics\n"
+    injected = header + snippet.rstrip() + "\n"
+    if original:
+        old_lines = original.splitlines() or [""]
+        new_text = injected + original
+        new_lines = new_text.splitlines() or [""]
+        hunk = _unified_hunk(old_lines, new_lines, injected_line_count=len(injected.splitlines()))
+        diff = (
+            f"diff --git a/{rel} b/{rel}\n"
+            f"--- a/{rel}\n"
+            f"+++ b/{rel}\n"
+            f"{hunk}"
+        )
+    else:
+        added = "".join(f"+{line}\n" for line in injected.splitlines())
+        diff = (
+            f"diff --git a/{rel} b/{rel}\n"
+            f"--- /dev/null\n"
+            f"+++ b/{rel}\n"
+            f"@@ -0,0 +1,{len(injected.splitlines())} @@\n"
+            f"{added}"
+        )
+    return FixProposal(
+        diff=diff,
+        regression_test=(
+            "# Generated via fallback heuristics\n"
+            "def test_fallback_placeholder():\n"
+            "    assert True\n"
+        ),
+        regression_test_path=request.regression_test_path,
+        generation_mode="fallback",
+    )
+
+
+def _unified_hunk(old_lines: list[str], new_lines: list[str], *, injected_line_count: int) -> str:
+    context = old_lines[:3]
+    plus_lines = new_lines[: injected_line_count + len(context)]
+    old_count = len(context)
+    new_count = len(plus_lines)
+    rows = [f"@@ -1,{old_count} +1,{new_count} @@"]
+    for line in plus_lines[:injected_line_count]:
+        rows.append(f"+{line}")
+    for line in context:
+        rows.append(f" {line}")
+    return "\n".join(rows) + "\n"
 
 
 def read_source_files(base_dir: Path, relative_paths: list[str]) -> dict[str, str]:

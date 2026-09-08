@@ -1,0 +1,38 @@
+[
+  {
+    "number": 42,
+    "title": "How do I run the coding agent pipeline?",
+    "body": "I cloned the repo. How do I run the coding agent pipeline and review pending_approval?",
+    "html_url": "https://github.com/streamctx/streamctx-agents/issues/42",
+    "user": {"login": "alex"},
+    "labels": [{"name": "question"}],
+    "state": "open"
+  },
+  {
+    "number": 43,
+    "title": "Bug: sandbox pytest fails with TypeError in wrap()",
+    "body": "Traceback: TypeError: wrap() got an unexpected keyword. This is a regression in the coding agent sandbox.",
+    "html_url": "https://github.com/streamctx/streamctx-agents/issues/43",
+    "user": {"login": "sam"},
+    "labels": [{"name": "bug"}],
+    "state": "open"
+  },
+  {
+    "number": 44,
+    "title": "Istio sidecar drops HTTP/2 when an eBPF kprobe is attached",
+    "body": "Our GKE cluster's Istio sidecar drops HTTP/2 streams when we attach a custom eBPF kprobe to the CNI. Completely unrelated to StreamCtx but the cluster is on fire.",
+    "html_url": "https://github.com/streamctx/streamctx-agents/issues/44",
+    "user": {"login": "ops"},
+    "labels": [],
+    "state": "open"
+  },
+  {
+    "number": 45,
+    "title": "Please add dark mode to the dashboard",
+    "body": "Feature request: it would be nice to have a dark mode toggle. Enhancement / wishlist.",
+    "html_url": "https://github.com/streamctx/streamctx-agents/issues/45",
+    "user": {"login": "pat"},
+    "labels": [{"name": "enhancement"}],
+    "pull_request": {"url": "https://api.github.com/repos/x/pulls/45"}
+  }
+]
