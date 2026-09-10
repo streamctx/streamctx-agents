@@ -7,7 +7,6 @@ Same style as ``agents.competitor_agent.storage`` (SQLite file under
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -29,6 +28,7 @@ from agents.research_agent.models import (
     HypeStats,
     ResearchIdea,
 )
+from shared.db import connect, upsert_sql
 
 DEFAULT_AGENT_DB = (
     Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamctx"))
@@ -43,8 +43,11 @@ class ResearchStore:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect(
+            schema="research",
+            db_path=self.db_path,
+            check_same_thread=False,
+        )
         self._init_db()
 
     def _ensure_column(self, table: str, column: str, col_type: str) -> None:
@@ -312,11 +315,12 @@ class ResearchStore:
             )
             if label == HYPE_MARKETING:
                 self._conn.execute(
-                    """
-                    INSERT OR REPLACE INTO research_hype_discards (
-                        idea_id, source_url, title, discarded_at
-                    ) VALUES (?, ?, ?, ?)
-                    """,
+                    upsert_sql(
+                        "research_hype_discards",
+                        ("idea_id", "source_url", "title", "discarded_at"),
+                        conflict="idea_id",
+                        postgres=self._conn.backend == "postgres",
+                    ),
                     (idea_id, idea.source_url, idea.title, stamp),
                 )
                 self._bump_stat_unlocked("discarded", 1)
@@ -367,10 +371,13 @@ class ResearchStore:
         ]
 
     def _bump_stat_unlocked(self, key: str, delta: int) -> None:
+        # Qualify the left-hand column so Postgres does not treat
+        # ``value = value + excluded.value`` as ambiguous.
         self._conn.execute(
             """
             INSERT INTO research_hype_stats (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = value + excluded.value
+            ON CONFLICT(key) DO UPDATE SET
+                value = research_hype_stats.value + excluded.value
             """,
             (key, int(delta)),
         )

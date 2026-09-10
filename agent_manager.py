@@ -24,6 +24,7 @@ from dashboard import (
     REFRESH_SECONDS,
     RosterCard,
     _in_streamlit,
+    _require_dashboard_password,
     any_agent_running,
     assign_coding_task,
     assign_competitor_task,
@@ -836,24 +837,12 @@ def _render_dogfood_tools(st: Any) -> None:
 
 
 def _render_coding_view(st: Any, card: RosterCard) -> None:
+    from agents.coding_agent.tab import render_coding_tab
+
     render_roster_card(st, card, key_prefix="am-")
     _render_scoped_command(st, "coding")
     _render_coding_fix_flow(st)
-    st.subheader("Pending approvals")
-    render_pending_approvals(st, agent_key="coding", key_prefix="am-coding-")
-    from dashboard import load_pending_approvals
-
-    for item in load_pending_approvals():
-        if item.agent_key != "coding":
-            continue
-        extras = _coding_entry_extras(item.entry_id)
-        if extras:
-            st.caption(
-                f"{item.entry_id}: confidence={extras['confidence']:.2f} · "
-                f"verification={extras['verification_mode']} · "
-                f"auto_applied={extras['auto_applied']} · "
-                f"retries={extras['retries_used']}"
-            )
+    render_coding_tab(st, key_prefix="am-ca-")
     _render_dogfood_tools(st)
 
 
@@ -934,10 +923,11 @@ def _render_research_poll_results(st: Any) -> None:
 
 
 def _render_research_view(st: Any, card: RosterCard) -> None:
+    from agents.research_agent.tab import render_research_tab
+
     render_roster_card(st, card, key_prefix="am-")
     _render_scoped_command(st, "research")
-    st.subheader("poll() results")
-    _render_research_poll_results(st)
+    render_research_tab(st, key_prefix="am-ra-")
 
 
 def _hash_pairs(snapshots: list[Any]) -> list[dict[str, Any]]:
@@ -1010,6 +1000,8 @@ def _render_competitor_dedup(st: Any) -> None:
 
 
 def _render_competitor_view(st: Any, card: RosterCard) -> None:
+    from agents.competitor_agent.tab import render_competitor_tab
+
     render_roster_card(st, card, key_prefix="am-")
     _render_scoped_command(st, "competitor")
     st.subheader("Assign v1")
@@ -1017,16 +1009,8 @@ def _render_competitor_view(st: Any, card: RosterCard) -> None:
         "Forced one-shot version of Control Run: ``assign_check.run_directed_check`` "
         "(interval bypass, single competitor + snapshot kind)."
     )
-    if st.button("Run full snapshot poll", key="am-competitor-run"):
-        submit_agent("competitor")
-        st.rerun()
+    render_competitor_tab(st, key_prefix="am-cp-")
     _render_competitor_dedup(st)
-    st.subheader("Pending approvals")
-    st.caption(
-        "New signals and research summaries queue here. Approve/Decline only "
-        "updates the review row — nothing is published and this is not a strategy decision."
-    )
-    render_pending_approvals(st, agent_key="competitor", key_prefix="am-comp-")
 
 
 def _render_presales_view(st: Any, card: RosterCard) -> None:
@@ -1108,6 +1092,8 @@ def render() -> None:
         layout="wide",
         page_icon="🎛️",
     )
+    if not _require_dashboard_password(st):
+        return
     _inject_css(st)
     heading, refresh = st.columns([12, 1])
     with heading:

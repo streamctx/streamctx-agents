@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sqlite3
 import threading
 from pathlib import Path
 from typing import Optional
 
 from agents.coding_agent.models import FixPatternMatch, RootCauseType
+from shared.db import connect
 
 DEFAULT_AGENT_DB = Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamctx")) / "coding_agent.db"
 
@@ -24,8 +24,11 @@ class FixPatternStore:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect(
+            schema="coding",
+            db_path=self.db_path,
+            check_same_thread=False,
+        )
         self._init_db()
 
     def close(self) -> None:

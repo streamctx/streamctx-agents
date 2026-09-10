@@ -478,10 +478,12 @@ def test_competitor_tile_opens_assign_v1_and_langfuse_dedup():
     labels = [button.label for button in at.button]
     assert "Run full snapshot poll" in labels
     assert any(inp.label == "Command · Competitor Agent" for inp in at.text_input)
-    assert "Pending approvals" in body
+    assert "Pending Approval" in body or "Pending approvals" in body
     src = Path("agent_manager.py").read_text(encoding="utf-8")
-    assert "render_pending_approvals(st, agent_key=\"competitor\"" in src
-    assert "not a strategy decision" in src
+    assert "render_competitor_tab" in src
+    tab_src = Path("agents/competitor_agent/tab.py").read_text(encoding="utf-8")
+    assert "not a strategy decision" in tab_src
+    assert "not a strategy decision" in body or "Informational only" in body
 
 
 def test_presales_tile_opens_existing_tab():

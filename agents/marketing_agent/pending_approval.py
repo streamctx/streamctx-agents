@@ -9,7 +9,6 @@ content. They do not share a table.
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from agents.marketing_agent.models import PendingApprovalEntry
+from shared.db import connect
 
 DEFAULT_AGENT_DB = (
     Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamctx"))
@@ -86,8 +86,11 @@ class PendingApprovalStore:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect(
+            schema="marketing",
+            db_path=self.db_path,
+            check_same_thread=False,
+        )
         self._notifier = notifier
         self._enable_default_notifier = enable_default_notifier
         self._init_db()

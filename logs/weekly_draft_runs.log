@@ -1,0 +1,27 @@
+=== weekly-draft 2026-08-25T07:07:07.441993+00:00 ===
+model: dots-studio/dots-3-note-preview:free (preferred=meta-llama/llama-3.3-70b-instruct:free; FALLBACK to free list)
+free_models_seen: 21
+checked:
+  - streamctx @ C:\Users\ray9094\streamctx (ok); commits=8 merges=0 changelog_diff=yes
+  - streamctx-agents @ C:\Users\ray9094\streamctx-agents (ok); commits=8 merges=0 changelog_diff=no
+  - shipped=True technical=True depth=True launch=False
+drafted: Hacker News, Reddit, LinkedIn, Twitter / X, Dev.to, Indie Hackers, GitHub
+skipped:
+  - Product Hunt: no launch or version release this week
+=== weekly-draft 2026-08-25T07:31:33.981891+00:00 ===
+model: dots-studio/dots-3-note-preview:free (preferred=meta-llama/llama-3.3-70b-instruct:free; FALLBACK to free list)
+free_models_seen: 21
+checked:
+  - streamctx @ C:\Users\ray9094\streamctx (ok); commits=8 merges=0 changelog_diff=yes
+  - streamctx-agents @ C:\Users\ray9094\streamctx-agents (ok); commits=8 merges=0 changelog_diff=no
+  - shipped=True technical=True depth=True launch=False
+drafted: (none)
+skipped:
+  - Hacker News: already has a weekly-draft card this week
+  - Reddit: already has a weekly-draft card this week
+  - LinkedIn: already has a weekly-draft card this week
+  - Twitter / X: already has a weekly-draft card this week
+  - Dev.to: already has a weekly-draft card this week
+  - Indie Hackers: already has a weekly-draft card this week
+  - Product Hunt: no launch or version release this week
+  - GitHub: already has a weekly-draft card this week

@@ -9,7 +9,6 @@ path and no ``published`` status.
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +20,7 @@ from agents.presales_agent.models import (
     FLAGS,
     PendingApprovalEntry,
 )
+from shared.db import connect
 
 DEFAULT_AGENT_DB = (
     Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamctx")) / "leads.db"
@@ -50,8 +50,12 @@ class PendingApprovalStore:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect(
+            schema="leads",
+            db_path=self.db_path,
+            check_same_thread=False,
+            timeout=30,
+        )
         self._notifier = notifier
         self._enable_default_notifier = enable_default_notifier
         self._init_db()

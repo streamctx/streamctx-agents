@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import html
 import os
-import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
+
+from shared.db import connect
 
 DEFAULT_PIPELINE_DB = (
     Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamctx"))
@@ -180,8 +181,11 @@ class ContentPipelineStore:
         self.db_path = Path(db_path or DEFAULT_PIPELINE_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect(
+            schema="content_pipeline",
+            db_path=self.db_path,
+            check_same_thread=False,
+        )
         self._init_db()
 
     def close(self) -> None:

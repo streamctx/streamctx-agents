@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +18,7 @@ from agents.presales_agent.models import (
     Lead,
 )
 from agents.presales_agent.pending_approval import DEFAULT_AGENT_DB
+from shared.db import connect
 
 
 class LeadStore:
@@ -28,8 +28,12 @@ class LeadStore:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect(
+            schema="leads",
+            db_path=self.db_path,
+            check_same_thread=False,
+            timeout=30,
+        )
         self._init_db()
 
     def close(self) -> None:

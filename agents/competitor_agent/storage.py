@@ -8,12 +8,11 @@ free-form TEXT so the tracked list stays config-driven in later stages.
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from agents.competitor_agent.models import (
     SIGNAL_TYPES,
@@ -22,6 +21,7 @@ from agents.competitor_agent.models import (
     CompetitorSnapshot,
     WeeklyReport,
 )
+from shared.db import connect
 
 DEFAULT_AGENT_DB = (
     Path(os.environ.get("STREAMCTX_HOME", Path.home() / ".streamctx"))
@@ -36,8 +36,11 @@ class CompetitorStore:
         self.db_path = Path(db_path or DEFAULT_AGENT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect(
+            schema="competitor",
+            db_path=self.db_path,
+            check_same_thread=False,
+        )
         self._init_db()
 
     def close(self) -> None:
@@ -376,19 +379,20 @@ def _validate_enum(name: str, value: str, allowed: frozenset[str]) -> None:
         raise ValueError(f"Invalid {name} {value!r}; expected one of {sorted(allowed)}")
 
 
-def _row_to_snapshot(row: sqlite3.Row) -> CompetitorSnapshot:
+def _row_to_snapshot(row: Any) -> CompetitorSnapshot:
     data = dict(row)
+    rid = data.get("rowid", data.get("id"))
     return CompetitorSnapshot(
         competitor=str(data["competitor"]),
         snapshot_type=str(data["snapshot_type"]),
         content_hash=str(data["content_hash"]),
         raw_content=str(data["raw_content"]),
         captured_at=str(data["captured_at"]),
-        rowid=int(data["rowid"]) if data.get("rowid") is not None else None,
+        rowid=int(rid) if rid is not None else None,
     )
 
 
-def _row_to_signal(row: sqlite3.Row) -> CompetitorSignal:
+def _row_to_signal(row: Any) -> CompetitorSignal:
     data = dict(row)
     source_url = data.get("source_url")
     return CompetitorSignal(
@@ -401,7 +405,7 @@ def _row_to_signal(row: sqlite3.Row) -> CompetitorSignal:
     )
 
 
-def _row_to_report(row: sqlite3.Row) -> WeeklyReport:
+def _row_to_report(row: Any) -> WeeklyReport:
     data = dict(row)
     return WeeklyReport(
         report_id=str(data["report_id"]),

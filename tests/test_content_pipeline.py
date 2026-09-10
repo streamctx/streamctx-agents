@@ -205,8 +205,14 @@ def test_marketing_agent_entry_points_unchanged():
     assert '"Home"' in dashboard_src
     assert '"Roster"' in dashboard_src
     assert '"Content Pipeline"' in dashboard_src
+    assert '"Coding"' in dashboard_src
+    assert '"Competitor"' in dashboard_src
+    assert '"Research"' in dashboard_src
     assert "render_home_tab" in dashboard_src
     assert "render_pipeline_tab" in dashboard_src
+    assert "render_coding_tab" in dashboard_src
+    assert "render_competitor_tab" in dashboard_src
+    assert "render_research_tab" in dashboard_src
     assert 'marketing_agent.run' in dashboard_src
     assert 'assign_mode == "marketing"' in dashboard_src
 

@@ -1,13 +1,14 @@
 """StreamCtx Agent Control Center — Streamlit dashboard for the agents.
 
 Run history is read from ``~/.streamctx/sessions.db`` through StreamCtx's
-existing WAL-mode ``SessionStorage`` connection helpers. Pending-approval
-rows live in the per-agent SQLite files under the same home directory
-(``sessions.db`` has no ``pending_approval`` table).
+existing WAL-mode ``SessionStorage`` connection helpers (still SQLite; owned
+by the ``streamctx`` package).
 
-The Roster tab is a read of that existing SQLite state (plus optional
-writes into coding intake / marketing draft queues). It does not add a
-scheduler or a new task table.
+Pending-approval and other agent tables use ``shared.db``: Postgres when
+``DATABASE_URL`` is set (one schema per former ``*.db`` file), otherwise the
+legacy SQLite files under ``STREAMCTX_HOME``.
+
+Set ``DASHBOARD_PASSWORD`` to require a password before the UI loads.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from typing import Any, Callable, Optional
 
 from streamctx import get_tracker
 from streamctx.storage import get_storage
+
+from shared.db import connect, schema_for_path, upsert_sql, uses_postgres
 
 from agents.coding_agent import coding_agent
 from agents.coding_agent.pending_approval import (
@@ -1444,16 +1447,29 @@ def _readonly_query(
     if db_path is None:
         return []
     path = Path(db_path)
-    if not path.exists():
+    try:
+        schema = schema_for_path(path)
+    except ValueError:
+        if not path.exists():
+            return []
+        try:
+            conn = sqlite3.connect(str(path))
+            conn.row_factory = sqlite3.Row
+            try:
+                return [dict(row) for row in conn.execute(sql, params).fetchall()]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []
+    if not uses_postgres() and not path.exists():
         return []
     try:
-        conn = sqlite3.connect(str(path))
-        conn.row_factory = sqlite3.Row
+        conn = connect(schema=schema, db_path=path)
         try:
             return [dict(row) for row in conn.execute(sql, params).fetchall()]
         finally:
             conn.close()
-    except sqlite3.Error:
+    except Exception:
         return []
 
 
@@ -1470,7 +1486,7 @@ def _dashboard_state_path(db_path: Optional[Path | str] = None) -> Path:
 
 def read_dashboard_kv(key: str, *, db_path: Optional[Path | str] = None) -> Optional[str]:
     path = _dashboard_state_path(db_path)
-    if not path.exists():
+    if not uses_postgres() and not path.exists():
         return None
     rows = _readonly_query(path, "SELECT value FROM kv WHERE key = ?", (key,))
     if not rows:
@@ -1486,14 +1502,20 @@ def write_dashboard_kv(
     db_path: Optional[Path | str] = None,
 ) -> None:
     path = _dashboard_state_path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    if not uses_postgres():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(schema="dashboard", db_path=path)
     try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
         conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+            upsert_sql(
+                "kv",
+                ("key", "value"),
+                conflict="key",
+                postgres=conn.backend == "postgres",
+            ),
             (key, value),
         )
         conn.commit()
@@ -2731,6 +2753,24 @@ def _render_control_tab(st: Any) -> None:
     render_pending_approvals(st)
 
 
+def _require_dashboard_password(st: Any) -> bool:
+    """Gate the public Cloud URL behind ``DASHBOARD_PASSWORD`` when set."""
+    expected = (os.environ.get("DASHBOARD_PASSWORD") or "").strip()
+    if not expected:
+        return True
+    if st.session_state.get("dashboard_authenticated"):
+        return True
+    st.title("StreamCtx Agent Control Center")
+    st.caption("Password required.")
+    password = st.text_input("Password", type="password", key="dashboard_password_input")
+    if st.button("Unlock", key="dashboard_password_unlock"):
+        if password == expected:
+            st.session_state["dashboard_authenticated"] = True
+            st.rerun()
+        st.error("Incorrect password.")
+    return False
+
+
 def render() -> None:
     import streamlit as st
 
@@ -2739,6 +2779,8 @@ def render() -> None:
         layout="wide",
         page_icon="🎛️",
     )
+    if not _require_dashboard_password(st):
+        return
     heading, refresh = st.columns([12, 1])
     with heading:
         st.title("StreamCtx Agent Control Center")
@@ -2766,6 +2808,9 @@ def render() -> None:
         tab_roster,
         tab_control,
         tab_pipeline,
+        tab_coding,
+        tab_competitor,
+        tab_research,
         tab_presales,
         tab_techsupport,
         tab_legal,
@@ -2775,6 +2820,9 @@ def render() -> None:
             "Roster",
             "Control",
             "Content Pipeline",
+            "Coding",
+            "Competitor",
+            "Research",
             "Pre-Sales",
             "Tech Support",
             "Legal",
@@ -2792,6 +2840,18 @@ def render() -> None:
         from content_pipeline import render_pipeline_tab
 
         render_pipeline_tab(st)
+    with tab_coding:
+        from agents.coding_agent.tab import render_coding_tab
+
+        render_coding_tab(st)
+    with tab_competitor:
+        from agents.competitor_agent.tab import render_competitor_tab
+
+        render_competitor_tab(st)
+    with tab_research:
+        from agents.research_agent.tab import render_research_tab
+
+        render_research_tab(st)
     with tab_presales:
         from agents.presales_agent.tab import render_presales_tab
 
@@ -2810,5 +2870,5 @@ def render() -> None:
         st.rerun()
 
 
-if _in_streamlit():
+if __name__ == "__main__" and _in_streamlit():
     render()

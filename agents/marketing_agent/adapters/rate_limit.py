@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +14,7 @@ from agents.marketing_agent.settings import (
     REDDIT_MIN_LINK_KARMA,
     REDDIT_SUBREDDIT_INTERVAL_SECONDS,
 )
+from shared.db import connect
 
 NowFn = Callable[[], datetime]
 
@@ -56,7 +56,11 @@ class RedditRateLimiter:
         self.min_comment_karma = int(min_comment_karma)
         self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn = connect(
+            schema="marketing",
+            db_path=self.db_path,
+            check_same_thread=False,
+        )
         self._init_db()
 
     def close(self) -> None:

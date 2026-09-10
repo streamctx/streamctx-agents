@@ -4,3 +4,5 @@ Pygments==2.20.0
 rich==15.0.0
 streamctx==0.4.3
 streamlit>=1.32
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0

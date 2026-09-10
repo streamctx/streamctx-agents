@@ -296,6 +296,26 @@ def test_dashboard_home_tab_is_first():
     assert "render_home_tab" in src
 
 
+def test_refresh_dashboard_key_is_unique():
+    src = Path("dashboard.py").read_text(encoding="utf-8")
+    home = Path("home_view.py").read_text(encoding="utf-8")
+    assert src.count('key="refresh-dashboard"') == 1
+    assert 'key="refresh-dashboard"' not in home
+    assert 'if __name__ == "__main__" and _in_streamlit():' in src
+
+
+def test_dashboard_home_loads_without_duplicate_keys():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("dashboard.py", default_timeout=25)
+    at.run()
+    assert not at.exception
+    body = "\n".join(str(m.value) for m in at.markdown)
+    assert "Pending approval" in body
+    refresh_keys = [btn.key for btn in at.button if getattr(btn, "key", None) == "refresh-dashboard"]
+    assert len(refresh_keys) <= 1
+
+
 def test_ready_to_publish_never_calls_social_adapters():
     dash = Path("dashboard.py").read_text(encoding="utf-8")
     home = Path("home_view.py").read_text(encoding="utf-8")
